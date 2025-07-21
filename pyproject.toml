@@ -1,0 +1,45 @@
+[tool.poetry]
+name = "xahaud-memory-monitor"
+version = "0.1.0"
+description = "Memory usage monitor for xahaud/rippled binaries with Textual dashboard"
+authors = ["Nicholas Dudfield <nick@email.com>"]
+readme = "README.md"
+packages = [{include = "memory_usage"}]
+
+[tool.poetry.dependencies]
+python = ">=3.13,<4.0"
+xrpl-py = "^4.2.0"
+pydantic = "^2.11.7"
+psutil = "^7.0.0"
+textual = "^4.0.0"
+rich = "^14.0.0"
+aiofiles = "^24.1.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.1"
+pytest-asyncio = "^1.1.0"
+black = "^25.1.0"
+mypy = "^1.17.0"
+ruff = "^0.12.4"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+xahaud-monitor = "memory_usage.cli:run"
+xahaud-dashboard = "memory_usage.dashboard:main"
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
