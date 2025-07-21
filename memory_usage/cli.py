@@ -1232,7 +1232,60 @@ async def main():
 
 def run():
     """Entry point for the CLI"""
-    asyncio.run(main())
+    import argparse
+    from .config import Config
+    from .monitor_dashboard import MonitorDashboard
+    
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='Monitor rippled binary memory usage')
+    parser.add_argument('--duration', '-d', type=int, default=5, 
+                       help='Test duration in minutes for each binary (default: 5)')
+    parser.add_argument('--binaries', '-b', nargs='+', 
+                       help='Specific binaries to test (e.g. rippled-compact-exact rippled-normal)')
+    parser.add_argument('--config', '-c', type=str, default=DEFAULT_RIPPLED_CONFIG_PATH,
+                       help=f'Path to rippled config file (default: {DEFAULT_RIPPLED_CONFIG_PATH})')
+    parser.add_argument('--websocket-url', '-w', type=str,
+                       help='Override websocket URL (e.g. ws://localhost:6009)')
+    parser.add_argument('--api-version', '-v', type=int, choices=[1, 2],
+                       help='API version to use (auto-detected if not specified)')
+    parser.add_argument('--standalone', '-s', action='store_true',
+                       help='Run rippled in standalone mode (mutually exclusive with --net)')
+    
+    args = parser.parse_args()
+    
+    # Determine API version
+    api_version = args.api_version
+    if not api_version:
+        # Auto-detect based on config
+        if detect_xahau(args.config):
+            api_version = 1
+        else:
+            api_version = DEFAULT_API_VERSION
+    
+    # Determine WebSocket URL
+    websocket_url = args.websocket_url
+    if not websocket_url:
+        # Parse config file to get ports
+        ws_port, rpc_port = parse_rippled_config(args.config)
+        if ws_port:
+            websocket_url = f"ws://localhost:{ws_port}"
+        else:
+            # Fallback to default
+            websocket_url = f"ws://localhost:{DEFAULT_WEBSOCKET_PORT}"
+    
+    # Create config object
+    config = Config(
+        rippled_config_path=args.config,
+        websocket_url=websocket_url,
+        api_version=api_version,
+        standalone_mode=args.standalone,
+        test_duration_minutes=args.duration,
+        specified_binaries=args.binaries
+    )
+    
+    # Run the dashboard
+    app = MonitorDashboard(config)
+    app.run()
 
 if __name__ == "__main__":
     run()
