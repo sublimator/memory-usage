@@ -8,17 +8,17 @@ from textual.widgets import Header, Footer
 from textual.binding import Binding
 from datetime import datetime
 import asyncio
-import logging
+from typing import TYPE_CHECKING
 from dependency_injector.wiring import Provide, inject
+
+if TYPE_CHECKING:
+    from ..services.logging_service import LoggingService
 
 from .components import StatusBar, MonitorLogViewer, ProcessOutputViewer
 from ..container import Container
 from ..managers import StateManager, ProcessManager, WebSocketManager
 from ..services import MonitoringService
 from ..config import Config
-
-
-logger = logging.getLogger(__name__)
 
 
 class MemoryMonitorDashboard(App):
@@ -75,7 +75,8 @@ class MemoryMonitorDashboard(App):
         state_manager: StateManager = Provide[Container.state_manager],
         process_manager: ProcessManager = Provide[Container.process_manager],
         websocket_manager: WebSocketManager = Provide[Container.websocket_manager],
-        monitoring_service: MonitoringService = Provide[Container.monitoring_service]
+        monitoring_service: MonitoringService = Provide[Container.monitoring_service],
+        logging_service: "LoggingService" = Provide[Container.logging_service]
     ):
         super().__init__()
         self.config = config
@@ -83,6 +84,7 @@ class MemoryMonitorDashboard(App):
         self.process_manager = process_manager
         self.websocket_manager = websocket_manager
         self.monitoring_service = monitoring_service
+        self.logging_service = logging_service
         
         self.title = "Xahaud Memory Monitor Dashboard"
         self.sub_title = "Real-time memory monitoring"
@@ -136,26 +138,22 @@ class MemoryMonitorDashboard(App):
     
     def _setup_logging(self):
         """Set up logging to capture to the monitor log"""
-        class DashboardLogHandler(logging.Handler):
-            def __init__(self, log_viewer):
-                super().__init__()
-                self.log_viewer = log_viewer
-            
-            def emit(self, record):
-                msg = self.format(record)
-                style_map = {
-                    logging.ERROR: "red",
-                    logging.WARNING: "yellow",
-                    logging.INFO: None,
-                    logging.DEBUG: "dim"
-                }
-                style = style_map.get(record.levelno, None)
-                self.log_viewer.queue_message(msg, style)
+        from ..services.logging_service import LogLevel
         
-        # Add handler to root logger
-        handler = DashboardLogHandler(self.monitor_log)
-        handler.setFormatter(logging.Formatter('%(message)s'))
-        logging.getLogger().addHandler(handler)
+        def log_handler(message: str, level: LogLevel):
+            """Handle log messages from the logging service"""
+            style_map = {
+                LogLevel.ERROR: "red",
+                LogLevel.WARNING: "yellow",
+                LogLevel.INFO: None,
+                LogLevel.DEBUG: "dim",
+                LogLevel.CRITICAL: "bold red"
+            }
+            style = style_map.get(level, None)
+            self.monitor_log.queue_message(message, style)
+        
+        # Add handler to logging service
+        self.logging_service.add_handler(log_handler)
     
     def _setup_process_output(self):
         """Set up process output capture"""
@@ -204,7 +202,7 @@ class MemoryMonitorDashboard(App):
             # Find binaries
             binaries = self.process_manager.find_binaries()
             if not binaries:
-                logger.error("No binaries found!")
+                self.logging_service.error("No binaries found!")
                 await self.state_manager.update_status("Error: No binaries found")
                 return
             
@@ -212,7 +210,7 @@ class MemoryMonitorDashboard(App):
             await self.monitoring_service.start_monitoring(binaries)
             
         except Exception as e:
-            logger.error(f"Error during monitoring: {e}")
+            self.logging_service.error(f"Error during monitoring: {e}")
             await self.state_manager.update_status(f"Error: {str(e)}")
     
     def action_clear(self) -> None:

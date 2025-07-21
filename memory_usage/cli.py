@@ -105,6 +105,7 @@ def run():
     container.wire(modules=[
         "memory_usage.ui.dashboard",
         "memory_usage.services.monitoring_service",
+        "memory_usage.services.logging_service",
         "memory_usage.managers.process_manager",
         "memory_usage.managers.websocket_manager",
         "memory_usage.managers.state_manager",

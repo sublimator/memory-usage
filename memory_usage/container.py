@@ -9,6 +9,7 @@ from .managers.state_manager import StateManager
 from .managers.process_manager import ProcessManager
 from .managers.websocket_manager import WebSocketManager
 from .services.monitoring_service import MonitoringService
+from .services.logging_service import LoggingService
 
 
 class Container(containers.DeclarativeContainer):
@@ -16,6 +17,11 @@ class Container(containers.DeclarativeContainer):
     
     # Configuration - will be overridden with actual Config object
     config = providers.Object(None)
+    
+    # Services (Singletons)
+    logging_service = providers.Singleton(
+        LoggingService
+    )
     
     # Managers (Singletons - shared across the app)
     state_manager = providers.Singleton(
@@ -38,5 +44,6 @@ class Container(containers.DeclarativeContainer):
         config=config,
         state_manager=state_manager,
         process_manager=process_manager,
-        websocket_manager=websocket_manager
+        websocket_manager=websocket_manager,
+        logging_service=logging_service
     )
