@@ -29,12 +29,44 @@ class MemoryMonitorDashboard(App):
         background: $surface;
     }
     
-    #status-bar {
+    #status-bar-container {
         dock: top;
+        height: 3;
+        width: 100%;
+    }
+    
+    #status-bar {
         height: 3;
         background: $panel;
         border: solid $primary;
         padding: 0 1;
+        width: 100%;
+        layout: horizontal;
+    }
+    
+    .status-text {
+        width: 1fr;
+        content-align: left middle;
+        color: $text;
+        text-style: bold;
+    }
+    
+    .memory-text {
+        width: 1fr;
+        content-align: center middle;
+        color: $success;
+    }
+    
+    .complete-ledgers {
+        width: 2fr;
+        content-align: center middle;
+        color: $warning;
+    }
+    
+    .current-ledger {
+        width: 1fr;
+        content-align: right middle;
+        color: $accent;
     }
     
     #main-container {

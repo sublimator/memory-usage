@@ -15,6 +15,7 @@ textual = "^4.0.0"
 rich = "^14.0.0"
 aiofiles = "^24.1.0"
 dependency-injector = {extras = ["pydantic2"], version = "^4.48.1"}
+pydantic-settings = "^2.10.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.1"
