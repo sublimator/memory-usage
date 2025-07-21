@@ -1,0 +1,39 @@
+[importlinter]
+root_package = memory_usage
+
+[importlinter:contract:1]
+name = No circular imports
+type = independence
+modules =
+    memory_usage.managers
+    memory_usage.services
+    memory_usage.ui
+
+[importlinter:contract:2]
+name = Layers should not import from higher layers
+type = layers
+layers =
+    memory_usage.models
+    memory_usage.utils
+    memory_usage.config
+    memory_usage.services
+    memory_usage.managers
+    memory_usage.ui
+    memory_usage.cli
+    memory_usage.container
+
+[importlinter:contract:3]
+name = Services should not import managers directly (use DI)
+type = forbidden
+source_modules = 
+    memory_usage.services
+forbidden_modules =
+    memory_usage.managers
+
+[importlinter:contract:4]
+name = UI should not import services directly (use DI)
+type = forbidden
+source_modules = 
+    memory_usage.ui
+forbidden_modules =
+    memory_usage.services

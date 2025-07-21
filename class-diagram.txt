@@ -1,0 +1,116 @@
+MEMORY MONITOR SYSTEM - CLASS DIAGRAM
+=====================================
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                                    LEGEND                                         │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│ [NEW] = New architecture components                                               │
+│ [LEGACY] = Legacy components (from monitoring.py)                                 │
+│ ──────> = Uses/References                                                         │
+│ - - - > = Planned but not fully implemented                                       │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                                UI LAYER                                           │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────┐
+│   Dashboard [NEW]        │
+│ (ui/dashboard.py)        │
+│                          │
+│ Main UI application      │
+│ - Textual-based TUI      │
+│ - Dependency injection   │
+└─────────────┬────────────┘
+              │
+              │ uses (via DI)
+              ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                             SERVICE LAYER                                         │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────┐         ┌──────────────────────────┐
+│ MonitoringService [NEW]  │         │  ProcessService [NEW]    │
+│ (services/               │         │  (services/              │
+│  monitoring_service.py)  │         │   process_service.py)    │
+│                          │         │                          │
+│ Orchestrates monitoring  │         │  Enhanced process with   │
+│ - Test lifecycle         │         │  output callbacks        │
+│ - Binary testing         │         │  - Start/stop process    │
+│ - Result tracking        │         │  - Capture output        │
+└─────────────┬────────────┘         │  - Memory stats          │
+              │                      └──────────────────────────┘
+              │ uses                              ▲
+              ▼                                   │
+┌─────────────────────────────────────────────────┼────────────────────────────────┐
+│                           MANAGER LAYER          │                                │
+└──────────────────────────────────────────────────┼────────────────────────────────┘
+                                                  │
+┌──────────────────────────┐         ┌────────────┴─────────────┐
+│  ProcessManager [NEW]    │◄────────│  StateManager [NEW]      │
+│  (managers/              │  uses   │  (managers/              │
+│   process_manager.py)    │         │   state_manager.py)      │
+│                          │         │                          │
+│  Manages processes       │         │  UI state management     │
+│  - Binary discovery      │         │  - Memory stats          │
+│  - Process lifecycle     │         │  - Test progress         │
+│  - Output callbacks      │         │  - Status updates        │
+└────────────┬─────────────┘         └──────────────────────────┘
+             │                                    ▲
+             │ currently references               │
+             │ (but should use ProcessService)    │
+             ▼                                    │
+        ┌─────────────┐                           │
+        │ ISSUE HERE: │                           │
+        │ RippledProcess                          │
+        │ not imported │                          │
+        └─────────────┘                           │
+                                                  │
+┌──────────────────────────┐         ┌────────────┴─────────────┐
+│ WebSocketManager [NEW]   │         │  MemoryMonitor [LEGACY]  │
+│ (managers/               │         │  (monitoring.py)         │
+│  websocket_manager.py)   │         │                          │
+│                          │         │  Monolithic class with:  │
+│ WebSocket communication  │         │  - Process management    │
+│ - Server info            │         │  - WebSocket handling    │
+│ - Ledger events          │         │  - Memory monitoring     │
+│ - Message handling       │         │  - Result tracking       │
+└──────────────────────────┘         │  - Test orchestration   │
+                                     │                          │
+                                     │  Contains inner class:   │
+                                     │  ┌────────────────────┐  │
+                                     │  │ RippledProcess     │  │
+                                     │  │ [LEGACY]           │  │
+                                     │  │                    │  │
+                                     │  │ Process wrapper    │  │
+                                     │  │ - Start/stop       │  │
+                                     │  │ - Output capture   │  │
+                                     │  │ - Memory stats     │  │
+                                     │  └────────────────────┘  │
+                                     └──────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          ARCHITECTURAL NOTES                                      │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│ 1. LEGACY ARCHITECTURE (monitoring.py):                                           │
+│    - MemoryMonitor is a monolithic class handling everything                      │
+│    - RippledProcess is defined inside monitoring.py                               │
+│    - Tight coupling between components                                            │
+│                                                                                   │
+│ 2. NEW ARCHITECTURE:                                                              │
+│    - Separation of concerns with dedicated managers and services                  │
+│    - Dependency injection via Container (container.py)                            │
+│    - ProcessService replaces RippledProcess functionality                         │
+│    - Dashboard uses all new components via DI                                     │
+│                                                                                   │
+│ 3. MIGRATION ISSUE:                                                               │
+│    - ProcessManager still references RippledProcess but doesn't import it         │
+│    - Should be using ProcessService instead                                       │
+│    - This appears to be an incomplete refactoring                                 │
+│                                                                                   │
+│ 4. KEY RELATIONSHIPS:                                                             │
+│    - Dashboard → MonitoringService → {ProcessManager, WebSocketManager}           │
+│    - MonitoringService → StateManager (for UI updates)                           │
+│    - ProcessManager should use ProcessService (not RippledProcess)                │
+│    - All new components are wired together via dependency injection               │
+└─────────────────────────────────────────────────────────────────────────────────┘

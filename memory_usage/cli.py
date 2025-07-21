@@ -5,11 +5,10 @@ Command-line interface for Xahaud Memory Monitor
 
 import argparse
 from pathlib import Path
-import configparser
-from typing import Optional, Tuple
 
 from .config import Config
-from .monitor_dashboard import MonitorDashboard
+from .container import Container
+from .utils import detect_xahau, parse_rippled_config
 
 # Default Configuration
 DEFAULT_RIPPLED_CONFIG_PATH = "niq-conf/xahaud.cfg"
@@ -17,146 +16,23 @@ DEFAULT_WEBSOCKET_PORT = 6009
 DEFAULT_API_VERSION = 2  # Standard XRPL uses version 2
 
 
-def detect_xahau(config_path: str) -> bool:
-    """Detect if this is a Xahau configuration based on file name or content."""
-    # Check file name
-    if 'xahau' in config_path.lower():
-        return True
-    
-    # Check file content
-    try:
-        if Path(config_path).exists():
-            with open(config_path, 'r') as f:
-                content = f.read().lower()
-                if 'xahau' in content:
-                    return True
-    except Exception:
-        pass
-    
-    return False
-
-
-def parse_rippled_config(config_path: str) -> Tuple[Optional[int], Optional[int]]:
-    """Parse rippled configuration file to extract websocket and RPC ports.
-    Returns (websocket_port, rpc_port) or (None, None) if not found."""
-    try:
-        if not Path(config_path).exists():
-            return None, None
-            
-        config = configparser.ConfigParser()
-        # Read the file with custom parsing to handle the rippled config format
-        with open(config_path, 'r') as f:
-            config_str = f.read()
+def list_binaries(build_dir: str = "build"):
+    """List available binaries and exit"""
+    build_path = Path(build_dir)
+    if build_path.exists():
+        binaries = []
+        for file_path in build_path.glob("rippled-*"):
+            if file_path.is_file() and file_path.stat().st_mode & 0o111:
+                binaries.append(file_path.name)
         
-        # rippled uses a custom format, we need to parse it manually
-        current_section = None
-        sections = {}
-        
-        for line in config_str.split('\n'):
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-                
-            # Check if this is a section header
-            if line.startswith('[') and line.endswith(']'):
-                current_section = line[1:-1]
-                if current_section not in sections:
-                    sections[current_section] = {}
-            elif current_section and '=' in line:
-                # Parse key = value
-                key, value = line.split('=', 1)
-                sections[current_section][key.strip()] = value.strip()
-            elif current_section:
-                # Single value line (like port numbers)
-                if line.replace(' ', '').replace('.', '').replace('_', '').isalnum():
-                    if 'values' not in sections[current_section]:
-                        sections[current_section]['values'] = []
-                    sections[current_section]['values'].append(line)
-        
-        ws_port = None
-        rpc_port = None
-        
-        # Look for websocket admin port (port_ws_admin_local)
-        if 'port_ws_admin_local' in sections:
-            port_section = sections['port_ws_admin_local']
-            if 'port' in port_section:
-                ws_port = int(port_section['port'])
-        
-        # Fallback to public websocket port
-        if not ws_port and 'port_ws_public' in sections:
-            port_section = sections['port_ws_public']
-            if 'port' in port_section:
-                ws_port = int(port_section['port'])
-        
-        # Look for RPC admin port (port_rpc_admin_local)
-        if 'port_rpc_admin_local' in sections:
-            port_section = sections['port_rpc_admin_local']
-            if 'port' in port_section:
-                rpc_port = int(port_section['port'])
-        
-        # Fallback to public RPC port
-        if not rpc_port and 'port_rpc_public' in sections:
-            port_section = sections['port_rpc_public']
-            if 'port' in port_section:
-                rpc_port = int(port_section['port'])
-                
-        return ws_port, rpc_port
-        
-    except Exception:
-        return None, None
-
-
-def parse_ledger_ranges(complete_ledgers: str) -> int:
-    """Parse complete_ledgers range set and return total count.
-    
-    Handles formats like:
-    - "empty" -> 0
-    - "100-200" -> 101
-    - "100-200,300-400" -> 202
-    - "100-200,300-400,500-600" -> 303
-    """
-    if not complete_ledgers or complete_ledgers == 'empty':
-        return 0
-    
-    total_count = 0
-    try:
-        # Split by comma to get individual ranges
-        ranges = complete_ledgers.split(',')
-        
-        for range_str in ranges:
-            range_str = range_str.strip()
-            if '-' in range_str:
-                parts = range_str.split('-')
-                if len(parts) == 2:
-                    start = int(parts[0].strip())
-                    end = int(parts[1].strip())
-                    # Include both start and end in count
-                    total_count += (end - start + 1)
-    except Exception:
-        return 0
-    
-    return total_count
-
-
-def format_ledger_ranges(complete_ledgers: str, max_length: int = 50) -> str:
-    """Format complete_ledgers string for display.
-    
-    If the string is too long, shows first and last range with count.
-    E.g., "100-200,300-400,...,900-1000 (5 ranges)"
-    """
-    if not complete_ledgers or complete_ledgers == 'empty':
-        return complete_ledgers
-    
-    if len(complete_ledgers) <= max_length:
-        return complete_ledgers
-    
-    # Split into ranges
-    ranges = [r.strip() for r in complete_ledgers.split(',')]
-    if len(ranges) <= 2:
-        return complete_ledgers
-    
-    # Show first and last with ellipsis
-    return f"{ranges[0]},...,{ranges[-1]} ({len(ranges)} ranges)"
+        if binaries:
+            print("Available binaries:")
+            for binary in sorted(binaries):
+                print(f"  - {binary}")
+        else:
+            print("No rippled binaries found in build/ directory")
+    else:
+        print(f"Build directory {build_dir} does not exist")
 
 
 def run():
@@ -167,6 +43,8 @@ def run():
                        help='Test duration in minutes for each binary (default: 5)')
     parser.add_argument('--binaries', '-b', nargs='+', 
                        help='Specific binaries to test (e.g. rippled-compact-exact rippled-normal)')
+    parser.add_argument('--list', '-l', action='store_true',
+                       help='List available binaries and exit')
     parser.add_argument('--config', '-c', type=str, default=DEFAULT_RIPPLED_CONFIG_PATH,
                        help=f'Path to rippled config file (default: {DEFAULT_RIPPLED_CONFIG_PATH})')
     parser.add_argument('--websocket-url', '-w', type=str,
@@ -175,8 +53,17 @@ def run():
                        help='API version to use (auto-detected if not specified)')
     parser.add_argument('--standalone', '-s', action='store_true',
                        help='Run rippled in standalone mode (mutually exclusive with --net)')
+    parser.add_argument('--build-dir', type=str, default='build',
+                       help='Directory containing rippled binaries (default: build)')
+    parser.add_argument('--output-dir', type=str, default='memory_monitor_results',
+                       help='Directory for output files (default: memory_monitor_results)')
     
     args = parser.parse_args()
+    
+    # Handle --list command
+    if args.list:
+        list_binaries(args.build_dir)
+        return
     
     # Determine API version
     api_version = args.api_version
@@ -198,16 +85,38 @@ def run():
             # Fallback to default
             websocket_url = f"ws://localhost:{DEFAULT_WEBSOCKET_PORT}"
     
-    # Create config object
+    # Create configuration
     config = Config(
         rippled_config_path=args.config,
         websocket_url=websocket_url,
         api_version=api_version,
         standalone_mode=args.standalone,
         test_duration_minutes=args.duration,
-        specified_binaries=args.binaries
+        specified_binaries=args.binaries,
+        build_dir=args.build_dir,
+        output_dir=args.output_dir,
+        poll_interval=4  # Default poll interval
     )
     
-    # Run the dashboard
-    app = MonitorDashboard(config)
+    # Configure DI container
+    container = Container()
+    # Pass the config object directly
+    container.config.override(config)
+    container.wire(modules=[
+        "memory_usage.ui.dashboard",
+        "memory_usage.services.monitoring_service",
+        "memory_usage.managers.process_manager",
+        "memory_usage.managers.websocket_manager",
+        "memory_usage.managers.state_manager",
+    ])
+    
+    # Import and run dashboard
+    from .ui.dashboard import MemoryMonitorDashboard
+    
+    # Create and run the dashboard
+    app = MemoryMonitorDashboard()
     app.run()
+
+
+if __name__ == "__main__":
+    run()

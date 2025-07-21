@@ -14,6 +14,7 @@ psutil = "^7.0.0"
 textual = "^4.0.0"
 rich = "^14.0.0"
 aiofiles = "^24.1.0"
+dependency-injector = {extras = ["pydantic2"], version = "^4.48.1"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.1"
@@ -21,6 +22,7 @@ pytest-asyncio = "^1.1.0"
 black = "^25.1.0"
 mypy = "^1.17.0"
 ruff = "^0.12.4"
+import-linter = "^2.3"
 
 [build-system]
 requires = ["poetry-core"]
