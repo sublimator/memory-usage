@@ -32,7 +32,6 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
 xahaud-monitor = "memory_usage.cli:run"
-xahaud-dashboard = "memory_usage.dashboard:main"
 
 [tool.black]
 line-length = 100

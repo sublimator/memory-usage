@@ -1,13 +1,20 @@
 # Xahaud Memory Monitor
 
-A memory usage monitoring tool for xahaud/rippled binaries with a Textual-based dashboard.
+A memory usage monitoring tool for xahaud/rippled binaries with an integrated Textual-based dashboard.
 
 ## Features
 
 - Monitor memory usage of multiple rippled/xahaud binaries
 - Real-time memory tracking with ledger synchronization
-- Beautiful terminal dashboard using Textual
-- Export results to JSON format
+- Beautiful terminal dashboard using Textual with:
+  - Live memory graph with time windows
+  - Internal diagnostics (get_counts) display
+  - Job types monitoring from server_info
+  - Ledger synchronization status with counts
+- Export comprehensive results to JSON format including:
+  - Memory snapshots with timestamps
+  - Diagnostic counts and job types at each snapshot
+  - System information and test configuration
 - Support for both network and standalone modes
 
 ## Installation
@@ -18,31 +25,33 @@ poetry install
 
 ## Usage
 
-### Command Line Interface
-
-Run memory monitoring tests:
+Run memory monitoring tests with the integrated dashboard:
 
 ```bash
-# Run with default settings
-poetry run xahaud-monitor
+# Run with specified config file
+poetry run xahaud-monitor --config path/to/xahaud.cfg
 
 # Run in standalone mode
-poetry run xahaud-monitor --standalone
+poetry run xahaud-monitor --config path/to/xahaud.cfg --standalone
 
 # Specify binaries to test
-poetry run xahaud-monitor --binaries rippled-compact rippled-normal
+poetry run xahaud-monitor --config path/to/xahaud.cfg --binaries rippled-compact rippled-normal
 
 # Custom test duration (in minutes)
-poetry run xahaud-monitor --duration 10
+poetry run xahaud-monitor --config path/to/xahaud.cfg --duration 10
+
+# List available binaries
+poetry run xahaud-monitor --list
 ```
 
-### Dashboard
+### Dashboard Features
 
-Launch the interactive dashboard:
-
-```bash
-poetry run xahaud-dashboard
-```
+The integrated dashboard displays:
+- Real-time memory usage with graphs
+- Ledger synchronization progress
+- Internal server diagnostics
+- Job queue statistics
+- Process output logs
 
 ## Configuration
 
