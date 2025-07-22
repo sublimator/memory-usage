@@ -6,26 +6,24 @@ import asyncio
 import json
 import logging
 import platform
-import psutil
 import socket
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, List, Dict, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional
 
-from ..models.memory_models import (
-    MemorySnapshot, BinaryTestResult, SystemInfo, TestConfiguration
-)
+import psutil
 
-from ..utils.parsers import parse_ledger_ranges
+from ..models.memory_models import BinaryTestResult, MemorySnapshot, SystemInfo, TestConfiguration
 from ..utils.formatters import format_duration, format_ledger_ranges
+from ..utils.parsers import parse_ledger_ranges
 
 # Type hints only - these are injected via DI
 if TYPE_CHECKING:
-    from ..managers.state_manager import StateManager
-    from ..managers.process_manager import ProcessManager
-    from ..managers.websocket_manager import WebSocketManager
     from ..config import Config
+    from ..managers.process_manager import ProcessManager
+    from ..managers.state_manager import StateManager
+    from ..managers.websocket_manager import WebSocketManager
     from .logging_service import LoggingService
 
 
@@ -38,7 +36,7 @@ class MonitoringService:
         state_manager: "StateManager",
         process_manager: "ProcessManager",
         websocket_manager: "WebSocketManager",
-        logging_service: "LoggingService"
+        logging_service: "LoggingService",
     ):
         self.config = config
         self.state_manager = state_manager
@@ -173,25 +171,51 @@ class MonitoringService:
             # Check server info
             server_info = await self.websocket_manager.get_server_info()
             if server_info:
-                complete_ledgers = server_info.get('complete_ledgers', 'empty')
+                complete_ledgers = server_info.get("complete_ledgers", "empty")
                 self.complete_ledgers = complete_ledgers  # Update tracked value
 
-                if complete_ledgers != 'empty' and complete_ledgers != '':
+                # Extract job types if available
+                if "load" in server_info and "job_types" in server_info["load"]:
+                    self.state_manager.state.job_types = server_info["load"]["job_types"]
+                    await self.state_manager._notify_observers()
+
+                if complete_ledgers != "empty" and complete_ledgers != "":
                     # We're synced!
                     ledger_count = parse_ledger_ranges(complete_ledgers)
                     await self.state_manager.update_ledger_info(
                         complete_ledgers,
-                        str(server_info.get('validated_ledger', {}).get('seq', 'N/A')),
-                        ledger_count
+                        str(server_info.get("validated_ledger", {}).get("seq", "N/A")),
+                        ledger_count,
                     )
 
                     if ledger_count > 0:
-                        self.logger.info(f"Ledgers available: {format_ledger_ranges(complete_ledgers)} (total: {ledger_count} ledgers)")
+                        self.logger.info(
+                            f"Ledgers available: {format_ledger_ranges(complete_ledgers)} (total: {ledger_count} ledgers)"
+                        )
                     else:
                         self.logger.info(f"Ledgers available: {complete_ledgers}")
 
                     self._monitoring_start_time = datetime.now()
-                    self.logger.info(f"Starting {self.config.test_duration_minutes} minute monitoring period from now")
+                    self.logger.info(
+                        f"Starting {self.config.test_duration_minutes} minute monitoring period from now"
+                    )
+
+                    # Freeze the sync duration at the final value
+                    final_sync_duration = (
+                        self._monitoring_start_time - self._test_start_time
+                    ).total_seconds()
+                    self.state_manager.state.sync_duration_seconds = final_sync_duration
+
+                    # Capture the sync start ledger
+                    validated_ledger = server_info.get("validated_ledger", {})
+                    if "seq" in validated_ledger:
+                        sync_ledger = validated_ledger["seq"]
+                        self.state_manager.state.sync_start_ledger = sync_ledger
+                        await self.state_manager._notify_observers()
+                        self.logger.info(
+                            f"Monitoring starting at ledger {sync_ledger} (sync took {format_duration(final_sync_duration)})"
+                        )
+
                     consecutive_failures = 0
                     break
                 else:
@@ -200,27 +224,41 @@ class MonitoringService:
                 # No server info - connection might be failing
                 consecutive_failures += 1
                 if consecutive_failures >= max_consecutive_failures:
-                    self.logger.error(f"Failed to connect to websocket {consecutive_failures} times in a row")
-                    self._finalize_binary_result("error", f"Websocket connection failed {consecutive_failures} times")
+                    self.logger.error(
+                        f"Failed to connect to websocket {consecutive_failures} times in a row"
+                    )
+                    self._finalize_binary_result(
+                        "error", f"Websocket connection failed {consecutive_failures} times"
+                    )
                     self._monitoring = False
                     break
 
             # Calculate elapsed time
-            poll_elapsed = (datetime.now() - self._test_start_time).total_seconds() if self._test_start_time else 0
+            poll_elapsed = (
+                (datetime.now() - self._test_start_time).total_seconds()
+                if self._test_start_time
+                else 0
+            )
 
             # Create memory snapshot during polling
             snapshot = self._create_memory_snapshot()
 
             # Log memory usage during polling
-            self.logger.info(f"No ledgers available yet, continuing to poll... (elapsed: {format_duration(poll_elapsed)})")
-            self.logger.info(f"Memory: {snapshot.rss_mb:.1f}MB ({snapshot.memory_percent:.1f}%) - Threads: {snapshot.num_threads}")
+            self.logger.info(
+                f"No ledgers available yet, continuing to poll... (elapsed: {format_duration(poll_elapsed)})"
+            )
+            self.logger.info(
+                f"Memory: {snapshot.rss_mb:.1f}MB ({snapshot.memory_percent:.1f}%) - Threads: {snapshot.num_threads}"
+            )
 
             # Update UI state
             await self.state_manager.update_memory_stats(
-                snapshot.rss_mb,
-                snapshot.memory_percent,
-                snapshot.num_threads
+                snapshot.rss_mb, snapshot.memory_percent, snapshot.num_threads
             )
+            # During polling, sync_duration is the same as elapsed time
+            await self.state_manager.update_timing(poll_elapsed, None)
+            self.state_manager.state.sync_duration_seconds = poll_elapsed
+            await self.state_manager._notify_observers()
 
             await asyncio.sleep(self.config.poll_interval)
 
@@ -229,7 +267,9 @@ class MonitoringService:
         self.logger.info("Starting monitoring phase...")
 
         # Calculate end time based on monitoring start (not test start)
-        end_time = self._monitoring_start_time + timedelta(minutes=self.config.test_duration_minutes)
+        end_time = self._monitoring_start_time + timedelta(
+            minutes=self.config.test_duration_minutes
+        )
 
         # Track time for periodic updates
         last_ledger_update = datetime.now()
@@ -246,16 +286,35 @@ class MonitoringService:
             if (datetime.now() - last_ledger_update).total_seconds() >= ledger_update_interval:
                 server_info = await self.websocket_manager.get_server_info()
                 if server_info:
-                    complete_ledgers = server_info.get('complete_ledgers', 'empty')
+                    complete_ledgers = server_info.get("complete_ledgers", "empty")
+
+                    # Extract job types if available
+                    if "load" in server_info and "job_types" in server_info["load"]:
+                        self.state_manager.state.job_types = server_info["load"]["job_types"]
+                        await self.state_manager._notify_observers()
+
                     if complete_ledgers:
                         self.complete_ledgers = complete_ledgers  # Update tracked value
                         ledger_count = parse_ledger_ranges(complete_ledgers)
                         await self.state_manager.update_ledger_info(
                             complete_ledgers,
-                            str(server_info.get('validated_ledger', {}).get('seq', 'N/A')),
-                            ledger_count
+                            str(server_info.get("validated_ledger", {}).get("seq", "N/A")),
+                            ledger_count,
                         )
                 last_ledger_update = datetime.now()
+
+            # Update timing
+            elapsed = (
+                (datetime.now() - self._test_start_time).total_seconds()
+                if self._test_start_time
+                else 0
+            )
+            monitoring_elapsed = (
+                (datetime.now() - self._monitoring_start_time).total_seconds()
+                if self._monitoring_start_time
+                else 0
+            )
+            await self.state_manager.update_timing(elapsed, monitoring_elapsed)
 
             # Note: ledger close events will trigger snapshots via _handle_websocket_message
             # which will also update memory stats
@@ -264,18 +323,20 @@ class MonitoringService:
 
     async def _handle_websocket_message(self, message: dict):
         """Handle incoming WebSocket messages"""
-        if message.get('type') == 'ledgerClosed':
+        if message.get("type") == "ledgerClosed":
             # Create snapshot for ledger close
             self._create_memory_snapshot(
-                ledger_index=message.get('ledger_index'),
-                ledger_hash=message.get('ledger_hash'),
-                transaction_count=message.get('txn_count', 0)
+                ledger_index=message.get("ledger_index"),
+                ledger_hash=message.get("ledger_hash"),
+                transaction_count=message.get("txn_count", 0),
             )
 
     def _initialize_binary_result(self, binary_path: str, binary_name: str):
         """Initialize result tracking for current binary"""
         binary_path_obj = Path(binary_path)
-        binary_size_mb = binary_path_obj.stat().st_size / (1024 * 1024) if binary_path_obj.exists() else 0
+        binary_size_mb = (
+            binary_path_obj.stat().st_size / (1024 * 1024) if binary_path_obj.exists() else 0
+        )
 
         self._current_result = BinaryTestResult(
             test_run_id=self.test_run_timestamp,
@@ -288,7 +349,7 @@ class MonitoringService:
             actual_duration_seconds=0,  # Will be calculated
             status="running",
             test_configuration=self.test_config,
-            system_info=self.system_info
+            system_info=self.system_info,
         )
 
         # Reset counters for this binary
@@ -302,11 +363,13 @@ class MonitoringService:
         self,
         ledger_index: Optional[int] = None,
         ledger_hash: Optional[str] = None,
-        transaction_count: Optional[int] = None
+        transaction_count: Optional[int] = None,
     ) -> MemorySnapshot:
         """Create a memory snapshot"""
         # Calculate elapsed time
-        elapsed = (datetime.now() - self._test_start_time).total_seconds() if self._test_start_time else 0
+        elapsed = (
+            (datetime.now() - self._test_start_time).total_seconds() if self._test_start_time else 0
+        )
 
         # Calculate monitoring elapsed if we're in monitoring phase
         monitoring_elapsed = None
@@ -332,12 +395,12 @@ class MonitoringService:
             ledger_hash=ledger_hash,
             transaction_count=transaction_count,
             cumulative_transactions=self.total_txns,
-            rss_mb=memory_stats.get('rss', 0),
-            vms_mb=memory_stats.get('vms', 0),
-            memory_percent=memory_stats.get('percent', 0),
-            num_threads=memory_stats.get('num_threads', 0),
+            rss_mb=memory_stats.get("rss", 0),
+            vms_mb=memory_stats.get("vms", 0),
+            memory_percent=memory_stats.get("percent", 0),
+            num_threads=memory_stats.get("num_threads", 0),
             complete_ledgers=self.complete_ledgers,
-            ledger_count=ledger_count
+            ledger_count=ledger_count,
         )
 
         # Add to current result
@@ -347,11 +410,17 @@ class MonitoringService:
         # Log ledger close if this is from a ledger event
         if ledger_index:
             if ledger_count > 0:
-                self.logger.info(f"Ledger closed: {ledger_index}, txns: {transaction_count} (total txns: {self.total_txns}, ranges: {format_ledger_ranges(self.complete_ledgers)} - {ledger_count} ledgers)")
+                self.logger.info(
+                    f"Ledger closed: {ledger_index}, txns: {transaction_count} (total txns: {self.total_txns}, ranges: {format_ledger_ranges(self.complete_ledgers)} - {ledger_count} ledgers)"
+                )
             else:
-                self.logger.info(f"Ledger closed: {ledger_index}, txns: {transaction_count} (total txns: {self.total_txns}, ranges: {self.complete_ledgers})")
+                self.logger.info(
+                    f"Ledger closed: {ledger_index}, txns: {transaction_count} (total txns: {self.total_txns}, ranges: {self.complete_ledgers})"
+                )
 
-            self.logger.info(f"Memory: {snapshot.rss_mb:.1f}MB ({snapshot.memory_percent:.1f}%) - Total elapsed: {format_duration(snapshot.elapsed_seconds)}, Test elapsed: {format_duration(snapshot.monitoring_elapsed_seconds or 0)}")
+            self.logger.info(
+                f"Memory: {snapshot.rss_mb:.1f}MB ({snapshot.memory_percent:.1f}%) - Total elapsed: {format_duration(snapshot.elapsed_seconds)}, Test elapsed: {format_duration(snapshot.monitoring_elapsed_seconds or 0)}"
+            )
 
         return snapshot
 
@@ -367,16 +436,22 @@ class MonitoringService:
 
         # Calculate durations
         if self._test_start_time:
-            self._current_result.actual_duration_seconds = (end_time - self._test_start_time).total_seconds()
+            self._current_result.actual_duration_seconds = (
+                end_time - self._test_start_time
+            ).total_seconds()
 
             if self._monitoring_start_time:
-                self._current_result.sync_duration_seconds = (self._monitoring_start_time - self._test_start_time).total_seconds()
-                self._current_result.monitoring_duration_seconds = (end_time - self._monitoring_start_time).total_seconds()
+                self._current_result.sync_duration_seconds = (
+                    self._monitoring_start_time - self._test_start_time
+                ).total_seconds()
+                self._current_result.monitoring_duration_seconds = (
+                    end_time - self._monitoring_start_time
+                ).total_seconds()
                 self._current_result.sync_time = self._monitoring_start_time.isoformat()
 
         # Get process exit code if available
         process = self.process_manager.get_current_process()
-        if process and hasattr(process, 'process') and process.process:
+        if process and hasattr(process, "process") and process.process:
             self._current_result.exit_code = process.process.poll()
 
         # Calculate memory statistics
@@ -393,18 +468,24 @@ class MonitoringService:
         self._current_result.final_complete_ledgers = self.complete_ledgers
 
         # Capture process output tails
-        if process and hasattr(process, 'stdout_buffer'):
+        if process and hasattr(process, "stdout_buffer"):
             self._current_result.stdout_tail = process.stdout_buffer[-100:]
             self._current_result.stderr_tail = process.stderr_buffer[-100:]
 
         # Log completion
         self.logger.info(f"Test completed for {self._current_result.binary_name}")
         self.logger.info(f"  Status: {status}")
-        self.logger.info(f"  Total time: {format_duration(self._current_result.actual_duration_seconds)}")
+        self.logger.info(
+            f"  Total time: {format_duration(self._current_result.actual_duration_seconds)}"
+        )
         if self._current_result.sync_duration_seconds:
-            self.logger.info(f"  Syncing time: {format_duration(self._current_result.sync_duration_seconds)}")
+            self.logger.info(
+                f"  Syncing time: {format_duration(self._current_result.sync_duration_seconds)}"
+            )
         if self._current_result.monitoring_duration_seconds:
-            self.logger.info(f"  Monitoring time: {format_duration(self._current_result.monitoring_duration_seconds)}")
+            self.logger.info(
+                f"  Monitoring time: {format_duration(self._current_result.monitoring_duration_seconds)}"
+            )
         if self._current_result.peak_memory_rss_mb:
             self.logger.info(f"  Peak memory: {self._current_result.peak_memory_rss_mb:.1f}MB")
         self.logger.info(f"  Total transactions: {self._current_result.total_transactions}")
@@ -418,7 +499,7 @@ class MonitoringService:
         output_file = self.test_output_dir / f"{self._current_result.binary_name}.json"
 
         try:
-            with open(output_file, 'w') as f:
+            with open(output_file, "w") as f:
                 f.write(self._current_result.model_dump_json(indent=2))
             self.logger.info(f"Results saved to: {output_file}")
         except Exception as e:
@@ -432,7 +513,7 @@ class MonitoringService:
             hostname=socket.gethostname(),
             cpu_count=psutil.cpu_count(),
             total_memory_gb=psutil.virtual_memory().total / (1024**3),
-            python_version=sys.version.split()[0]
+            python_version=sys.version.split()[0],
         )
 
     def _initialize_test_config(self):
@@ -442,5 +523,5 @@ class MonitoringService:
             poll_interval_seconds=self.config.poll_interval,
             websocket_url=self.config.websocket_url,
             rippled_config_path=self.config.rippled_config_path,
-            script_version="1.0.0"  # TODO: Could read from git
+            script_version="1.0.0",  # TODO: Could read from git
         )

@@ -24,7 +24,7 @@ def list_binaries(build_dir: str = "build"):
         for file_path in build_path.glob("rippled-*"):
             if file_path.is_file() and file_path.stat().st_mode & 0o111:
                 binaries.append(file_path.name)
-        
+
         if binaries:
             print("Available binaries:")
             for binary in sorted(binaries):
@@ -38,33 +38,66 @@ def list_binaries(build_dir: str = "build"):
 def run():
     """Entry point for the CLI"""
     # Parse arguments
-    parser = argparse.ArgumentParser(description='Monitor rippled binary memory usage')
-    parser.add_argument('--duration', '-d', type=int, default=5, 
-                       help='Test duration in minutes for each binary (default: 5)')
-    parser.add_argument('--binaries', '-b', nargs='+', 
-                       help='Specific binaries to test (e.g. rippled-compact-exact rippled-normal)')
-    parser.add_argument('--list', '-l', action='store_true',
-                       help='List available binaries and exit')
-    parser.add_argument('--config', '-c', type=str, default=DEFAULT_RIPPLED_CONFIG_PATH,
-                       help=f'Path to rippled config file (default: {DEFAULT_RIPPLED_CONFIG_PATH})')
-    parser.add_argument('--websocket-url', '-w', type=str,
-                       help='Override websocket URL (e.g. ws://localhost:6009)')
-    parser.add_argument('--api-version', '-v', type=int, choices=[1, 2],
-                       help='API version to use (auto-detected if not specified)')
-    parser.add_argument('--standalone', '-s', action='store_true',
-                       help='Run rippled in standalone mode (mutually exclusive with --net)')
-    parser.add_argument('--build-dir', type=str, default='build',
-                       help='Directory containing rippled binaries (default: build)')
-    parser.add_argument('--output-dir', type=str, default='memory_monitor_results',
-                       help='Directory for output files (default: memory_monitor_results)')
-    
+    parser = argparse.ArgumentParser(description="Monitor rippled binary memory usage")
+    parser.add_argument(
+        "--duration",
+        "-d",
+        type=int,
+        default=5,
+        help="Test duration in minutes for each binary (default: 5)",
+    )
+    parser.add_argument(
+        "--binaries",
+        "-b",
+        nargs="+",
+        help="Specific binaries to test (e.g. rippled-compact-exact rippled-normal)",
+    )
+    parser.add_argument(
+        "--list", "-l", action="store_true", help="List available binaries and exit"
+    )
+    parser.add_argument(
+        "--config",
+        "-c",
+        type=str,
+        default=DEFAULT_RIPPLED_CONFIG_PATH,
+        help=f"Path to rippled config file (default: {DEFAULT_RIPPLED_CONFIG_PATH})",
+    )
+    parser.add_argument(
+        "--websocket-url", "-w", type=str, help="Override websocket URL (e.g. ws://localhost:6009)"
+    )
+    parser.add_argument(
+        "--api-version",
+        "-v",
+        type=int,
+        choices=[1, 2],
+        help="API version to use (auto-detected if not specified)",
+    )
+    parser.add_argument(
+        "--standalone",
+        "-s",
+        action="store_true",
+        help="Run rippled in standalone mode (mutually exclusive with --net)",
+    )
+    parser.add_argument(
+        "--build-dir",
+        type=str,
+        default="build",
+        help="Directory containing rippled binaries (default: build)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="memory_monitor_results",
+        help="Directory for output files (default: memory_monitor_results)",
+    )
+
     args = parser.parse_args()
-    
+
     # Handle --list command
     if args.list:
         list_binaries(args.build_dir)
         return
-    
+
     # Determine API version
     api_version = args.api_version
     if not api_version:
@@ -73,7 +106,7 @@ def run():
             api_version = 1
         else:
             api_version = DEFAULT_API_VERSION
-    
+
     # Determine WebSocket URL
     websocket_url = args.websocket_url
     if not websocket_url:
@@ -84,7 +117,7 @@ def run():
         else:
             # Fallback to default
             websocket_url = f"ws://localhost:{DEFAULT_WEBSOCKET_PORT}"
-    
+
     # Create configuration
     config = Config(
         rippled_config_path=args.config,
@@ -95,25 +128,27 @@ def run():
         specified_binaries=args.binaries,
         build_dir=args.build_dir,
         output_dir=args.output_dir,
-        poll_interval=4  # Default poll interval
+        poll_interval=1,  # Default poll interval
     )
-    
+
     # Configure DI container
     container = Container()
     # Pass the config object directly
     container.config.override(config)
-    container.wire(modules=[
-        "memory_usage.ui.dashboard",
-        "memory_usage.services.monitoring_service",
-        "memory_usage.services.logging_service",
-        "memory_usage.managers.process_manager",
-        "memory_usage.managers.websocket_manager",
-        "memory_usage.managers.state_manager",
-    ])
-    
+    container.wire(
+        modules=[
+            "memory_usage.ui.dashboard",
+            "memory_usage.services.monitoring_service",
+            "memory_usage.services.logging_service",
+            "memory_usage.managers.process_manager",
+            "memory_usage.managers.websocket_manager",
+            "memory_usage.managers.state_manager",
+        ]
+    )
+
     # Import and run dashboard
     from .ui.dashboard import MemoryMonitorDashboard
-    
+
     # Create and run the dashboard
     app = MemoryMonitorDashboard()
     app.run()

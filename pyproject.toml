@@ -24,6 +24,7 @@ black = "^25.1.0"
 mypy = "^1.17.0"
 ruff = "^0.12.4"
 import-linter = "^2.3"
+isort = "^6.0.1"
 
 [build-system]
 requires = ["poetry-core"]
