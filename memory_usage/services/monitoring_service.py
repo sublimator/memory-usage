@@ -27,6 +27,10 @@ if TYPE_CHECKING:
     from .logging_service import LoggingService
 
 
+# Number of ledger closes to wait before considering synced
+LEDGER_CLOSES_FOR_SYNC = 1
+
+
 class MonitoringService:
     """Orchestrates the monitoring process"""
 
@@ -63,6 +67,7 @@ class MonitoringService:
         # Diagnostic data tracking
         self.latest_counts: Optional[Dict[str, Any]] = None
         self.latest_job_types: Optional[List[Dict[str, Any]]] = None
+        self.latest_catalogue_status: Optional[Dict[str, Any]] = None
 
         # Create output directory
         Path(self.config.output_dir).mkdir(exist_ok=True)
@@ -172,12 +177,13 @@ class MonitoringService:
                 self._finalize_binary_result("crashed", "Process crashed during polling")
                 break
 
-            # Check server info and get counts in parallel
+            # Check server info, get counts, and catalogue status in parallel
             server_info_task = self.websocket_manager.get_server_info()
             counts_task = self.websocket_manager.get_counts()
+            catalogue_task = self.websocket_manager.get_catalogue_status()
 
-            server_info, counts = await asyncio.gather(
-                server_info_task, counts_task, return_exceptions=True
+            server_info, counts, catalogue_status = await asyncio.gather(
+                server_info_task, counts_task, catalogue_task, return_exceptions=True
             )
 
             if isinstance(server_info, dict):
@@ -196,8 +202,14 @@ class MonitoringService:
                 self.state_manager.state.counts = counts
                 await self.state_manager._notify_observers()
 
-                if complete_ledgers != "empty" and complete_ledgers != "":
-                    # We're synced!
+            # Store catalogue status if available
+            if isinstance(catalogue_status, dict):
+                self.latest_catalogue_status = catalogue_status
+                self.state_manager.state.catalogue_status = catalogue_status
+                await self.state_manager._notify_observers()
+
+                # Always update ledger info even during polling
+                if complete_ledgers:
                     ledger_count = parse_ledger_ranges(complete_ledgers)
                     await self.state_manager.update_ledger_info(
                         complete_ledgers,
@@ -205,12 +217,17 @@ class MonitoringService:
                         ledger_count,
                     )
 
+                # Check if we've received enough ledger closes to consider ourselves synced
+                if self.ledger_close_count >= LEDGER_CLOSES_FOR_SYNC:
+                    # We're synced!
+                    self.logger.info(
+                        f"Received {self.ledger_close_count} ledger close(s), transitioning to monitoring phase"
+                    )
+
                     if ledger_count > 0:
                         self.logger.info(
                             f"Ledgers available: {format_ledger_ranges(complete_ledgers)} (total: {ledger_count} ledgers)"
                         )
-                    else:
-                        self.logger.info(f"Ledgers available: {complete_ledgers}")
 
                     self._monitoring_start_time = datetime.now()
                     self.logger.info(
@@ -223,20 +240,12 @@ class MonitoringService:
                     ).total_seconds()
                     self.state_manager.state.sync_duration_seconds = final_sync_duration
 
-                    # Capture the sync start ledger
-                    validated_ledger = server_info.get("validated_ledger", {})
-                    if "seq" in validated_ledger:
-                        sync_ledger = validated_ledger["seq"]
-                        self.state_manager.state.sync_start_ledger = sync_ledger
-                        await self.state_manager._notify_observers()
-                        self.logger.info(
-                            f"Monitoring starting at ledger {sync_ledger} (sync took {format_duration(final_sync_duration)})"
-                        )
+                    self.logger.info(f"Sync complete after {format_duration(final_sync_duration)}")
 
                     consecutive_failures = 0
                     break
-                else:
-                    consecutive_failures = 0  # Reset on successful connection
+
+                consecutive_failures = 0  # Reset on successful connection
             else:
                 # No server info - connection might be failing
                 consecutive_failures += 1
@@ -301,12 +310,13 @@ class MonitoringService:
 
             # Update complete_ledgers and diagnostics periodically
             if (datetime.now() - last_ledger_update).total_seconds() >= ledger_update_interval:
-                # Call server_info and get_counts in parallel
+                # Call server_info, get_counts, and catalogue_status in parallel
                 server_info_task = self.websocket_manager.get_server_info()
                 counts_task = self.websocket_manager.get_counts()
+                catalogue_task = self.websocket_manager.get_catalogue_status()
 
-                server_info, counts = await asyncio.gather(
-                    server_info_task, counts_task, return_exceptions=True
+                server_info, counts, catalogue_status = await asyncio.gather(
+                    server_info_task, counts_task, catalogue_task, return_exceptions=True
                 )
 
                 # Handle server_info
@@ -334,6 +344,12 @@ class MonitoringService:
                     self.state_manager.state.counts = counts
                     await self.state_manager._notify_observers()
 
+                # Handle catalogue status
+                if isinstance(catalogue_status, dict):
+                    self.latest_catalogue_status = catalogue_status
+                    self.state_manager.state.catalogue_status = catalogue_status
+                    await self.state_manager._notify_observers()
+
                 last_ledger_update = datetime.now()
 
             # Update timing
@@ -357,9 +373,30 @@ class MonitoringService:
     async def _handle_websocket_message(self, message: dict):
         """Handle incoming WebSocket messages"""
         if message.get("type") == "ledgerClosed":
+            ledger_index = message.get("ledger_index")
+
+            # Increment ledger close count
+            self.ledger_close_count += 1
+
+            # Capture sync start on first ledger close after monitoring starts
+            # This ensures we only track ledgers we actually process
+            if (
+                self._monitoring_start_time
+                and self.state_manager.state.sync_start_ledger is None
+                and ledger_index
+            ):
+                self.state_manager.state.sync_start_ledger = ledger_index
+                await self.state_manager._notify_observers()
+
+                # Log with validated_ledgers info if available
+                validated_ledgers = message.get("validated_ledgers", "not provided")
+                self.logger.info(
+                    f"Monitoring phase - tracking from ledger: {ledger_index} (validated_ledgers: {validated_ledgers})"
+                )
+
             # Create snapshot for ledger close
             self._create_memory_snapshot(
-                ledger_index=message.get("ledger_index"),
+                ledger_index=ledger_index,
                 ledger_hash=message.get("ledger_hash"),
                 transaction_count=message.get("txn_count", 0),
             )
@@ -391,6 +428,7 @@ class MonitoringService:
         self.ledger_close_count = 0
         self.latest_counts = None
         self.latest_job_types = None
+        self.latest_catalogue_status = None
 
         self.logger.info(f"Initialized result tracking for {binary_name}")
 

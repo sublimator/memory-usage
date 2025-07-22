@@ -74,6 +74,7 @@ class StatusBar(Static):
 
             # Add current ledger with @
             if state.current_ledger != "N/A":
+                current_ledger_num = None
                 try:
                     current_ledger_num = int(state.current_ledger)
                     ledgers_str += f" @ {current_ledger_num:,}"
@@ -82,12 +83,12 @@ class StatusBar(Static):
 
                 # Calculate ledgers since sync
                 ledgers_since_sync = 0
-                if state.sync_start_ledger is not None:
-                    try:
-                        current_ledger_num = int(state.current_ledger)
-                        ledgers_since_sync = current_ledger_num - state.sync_start_ledger
-                    except ValueError:
-                        pass
+                if state.sync_start_ledger is not None and current_ledger_num is not None:
+                    ledgers_since_sync = current_ledger_num - state.sync_start_ledger
+                    # Debug logging - always log to see what's happening
+                    print(
+                        f"DEBUG StatusBar: sync_start={state.sync_start_ledger}, current={current_ledger_num}, diff={ledgers_since_sync}"
+                    )
 
                 # Add counts in parentheses
                 ledgers_str += f" ({ledger_count:,} total"

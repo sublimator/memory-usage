@@ -21,6 +21,7 @@ from ..managers import ProcessManager, StateManager, WebSocketManager
 from ..managers.state_manager import ApplicationState
 from ..services import MonitoringService
 from .components import (
+    CatalogueStatusDisplay,
     CountsDisplay,
     JobsDisplay,
     MemoryGraph,
@@ -85,7 +86,7 @@ class MemoryMonitorDashboard(App):
     }
     
     #top-panel {
-        height: 2fr;
+        height: 3fr;
         width: 100%;
         layout: horizontal;
     }
@@ -112,6 +113,13 @@ class MemoryMonitorDashboard(App):
     JobsDisplay {
         height: 1fr;
         border: solid $warning;
+        padding: 1;
+        background: $surface;
+    }
+    
+    CatalogueStatusDisplay {
+        height: 1fr;
+        border: solid $secondary;
         padding: 1;
         background: $surface;
     }
@@ -260,6 +268,7 @@ class MemoryMonitorDashboard(App):
         self.process_output = None
         self.counts_display = None
         self.jobs_display = None
+        self.catalogue_display = None
         self.memory_graph = None
 
         # Background task
@@ -281,13 +290,16 @@ class MemoryMonitorDashboard(App):
                     self.monitor_log = MonitorLogViewer()
                     yield self.monitor_log
 
-                # Right 1/3 - Split vertically for counts and jobs
+                # Right 1/3 - Split vertically for counts, jobs, and catalogue
                 with Vertical(id="right-panel"):
                     self.counts_display = CountsDisplay()
                     yield self.counts_display
 
                     self.jobs_display = JobsDisplay()
                     yield self.jobs_display
+
+                    self.catalogue_display = CatalogueStatusDisplay()
+                    yield self.catalogue_display
 
             # Bottom section - Rippled output and memory graph
             with Vertical(id="bottom-section"):
@@ -357,13 +369,15 @@ class MemoryMonitorDashboard(App):
         self.process_manager.subscribe_stderr(on_stderr)
 
     def _setup_state_observer(self):
-        """Set up state observer for jobs and counts display"""
+        """Set up state observer for jobs, counts, and catalogue display"""
 
         def on_state_change(state: ApplicationState):
             if state.job_types and self.jobs_display:
                 self.jobs_display.update_jobs(state.job_types)
             if state.counts and self.counts_display:
                 self.counts_display.update_counts(state.counts)
+            if state.catalogue_status and self.catalogue_display:
+                self.catalogue_display.update_catalogue_status(state.catalogue_status)
 
         self.state_manager.subscribe(on_state_change)
 

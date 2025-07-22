@@ -2,6 +2,7 @@
 UI components for the dashboard
 """
 
+from .catalogue_status_display import CatalogueStatusDisplay
 from .counts_display import CountsDisplay
 from .jobs_display import JobsDisplay
 from .log_viewer import MonitorLogViewer, ProcessOutputViewer
@@ -16,4 +17,5 @@ __all__ = [
     "CountsDisplay",
     "JobsDisplay",
     "MemoryGraph",
+    "CatalogueStatusDisplay",
 ]

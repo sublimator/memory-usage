@@ -163,6 +163,34 @@ class WebSocketManager:
             logger.error(f"Error getting counts: {e}")
             return None
 
+    async def get_catalogue_status(self) -> Optional[Dict[str, Any]]:
+        """Get catalogue loading status"""
+        if not self.client or not self.client.is_open():
+            await self.connect()
+
+        try:
+            # Use GenericRequest for non-standard commands
+            from xrpl.models.requests import GenericRequest
+
+            catalogue_status_request = GenericRequest(
+                method="catalogue_status",
+                api_version=self.config.api_version,
+            )
+
+            response = await self.client.request(catalogue_status_request)
+
+            if response.is_successful():
+                # Debug log to see what we're getting
+                logger.debug(f"catalogue_status response: {response.result}")
+                return response.result
+            else:
+                logger.error(f"catalogue_status request failed: {response}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error getting catalogue status: {e}")
+            return None
+
     def add_message_handler(self, handler: Callable):
         """Add a message handler"""
         self._message_handlers.append(handler)

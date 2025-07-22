@@ -35,8 +35,15 @@ class JobsDisplay(VerticalScroll):
 
     def _format_jobs(self, job_types: List[Dict[str, Any]]) -> Table:
         """Format job types data into a nice table"""
-        table = Table(show_header=True, header_style="bold cyan", box=None, expand=True)
+        table = Table(
+            show_header=True,
+            header_style="bold cyan",
+            box=None,
+            expand=True,
+            row_styles=["none", "dim"],
+        )
         table.add_column("Job Type", style="yellow", width=None, ratio=3)
+        table.add_column("Wait", justify="center", style="cyan", width=None, ratio=1)
         table.add_column("In Prog", justify="center", style="magenta", width=None, ratio=1)
         table.add_column("Per Sec", justify="right", style="green", width=None, ratio=1)
         table.add_column("Avg Time", justify="right", style="blue", width=None, ratio=1)
@@ -47,6 +54,7 @@ class JobsDisplay(VerticalScroll):
 
         for job in sorted_jobs:
             job_type = job.get("job_type", "Unknown")
+            waiting = str(job.get("waiting", ""))
             in_progress = str(job.get("in_progress", ""))
             per_second = str(job.get("per_second", ""))
             avg_time = str(job.get("avg_time", ""))
@@ -55,6 +63,7 @@ class JobsDisplay(VerticalScroll):
             # Only show non-empty values
             table.add_row(
                 job_type,
+                waiting if waiting else "-",
                 in_progress if in_progress else "-",
                 per_second if per_second else "-",
                 avg_time if avg_time else "-",
