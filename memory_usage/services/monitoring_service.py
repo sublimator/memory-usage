@@ -60,6 +60,10 @@ class MonitoringService:
         self.complete_ledgers = "empty"
         self.ledger_close_count = 0
 
+        # Diagnostic data tracking
+        self.latest_counts: Optional[Dict[str, Any]] = None
+        self.latest_job_types: Optional[List[Dict[str, Any]]] = None
+
         # Create output directory
         Path(self.config.output_dir).mkdir(exist_ok=True)
         self.test_output_dir = Path(self.config.output_dir) / self.test_run_timestamp
@@ -168,16 +172,29 @@ class MonitoringService:
                 self._finalize_binary_result("crashed", "Process crashed during polling")
                 break
 
-            # Check server info
-            server_info = await self.websocket_manager.get_server_info()
-            if server_info:
+            # Check server info and get counts in parallel
+            server_info_task = self.websocket_manager.get_server_info()
+            counts_task = self.websocket_manager.get_counts()
+
+            server_info, counts = await asyncio.gather(
+                server_info_task, counts_task, return_exceptions=True
+            )
+
+            if isinstance(server_info, dict):
                 complete_ledgers = server_info.get("complete_ledgers", "empty")
                 self.complete_ledgers = complete_ledgers  # Update tracked value
 
-                # Extract job types if available
+                # Extract and store job types
                 if "load" in server_info and "job_types" in server_info["load"]:
-                    self.state_manager.state.job_types = server_info["load"]["job_types"]
+                    self.latest_job_types = server_info["load"]["job_types"]
+                    self.state_manager.state.job_types = self.latest_job_types
                     await self.state_manager._notify_observers()
+
+            # Store counts if available
+            if isinstance(counts, dict):
+                self.latest_counts = counts
+                self.state_manager.state.counts = counts
+                await self.state_manager._notify_observers()
 
                 if complete_ledgers != "empty" and complete_ledgers != "":
                     # We're synced!
@@ -282,15 +299,24 @@ class MonitoringService:
                 self._finalize_binary_result("crashed", "Process crashed during monitoring")
                 break
 
-            # Update complete_ledgers periodically
+            # Update complete_ledgers and diagnostics periodically
             if (datetime.now() - last_ledger_update).total_seconds() >= ledger_update_interval:
-                server_info = await self.websocket_manager.get_server_info()
-                if server_info:
+                # Call server_info and get_counts in parallel
+                server_info_task = self.websocket_manager.get_server_info()
+                counts_task = self.websocket_manager.get_counts()
+
+                server_info, counts = await asyncio.gather(
+                    server_info_task, counts_task, return_exceptions=True
+                )
+
+                # Handle server_info
+                if isinstance(server_info, dict):
                     complete_ledgers = server_info.get("complete_ledgers", "empty")
 
-                    # Extract job types if available
+                    # Extract and store job types
                     if "load" in server_info and "job_types" in server_info["load"]:
-                        self.state_manager.state.job_types = server_info["load"]["job_types"]
+                        self.latest_job_types = server_info["load"]["job_types"]
+                        self.state_manager.state.job_types = self.latest_job_types
                         await self.state_manager._notify_observers()
 
                     if complete_ledgers:
@@ -301,6 +327,13 @@ class MonitoringService:
                             str(server_info.get("validated_ledger", {}).get("seq", "N/A")),
                             ledger_count,
                         )
+
+                # Handle counts
+                if isinstance(counts, dict):
+                    self.latest_counts = counts
+                    self.state_manager.state.counts = counts
+                    await self.state_manager._notify_observers()
+
                 last_ledger_update = datetime.now()
 
             # Update timing
@@ -356,6 +389,8 @@ class MonitoringService:
         self.total_txns = 0
         self.complete_ledgers = "empty"
         self.ledger_close_count = 0
+        self.latest_counts = None
+        self.latest_job_types = None
 
         self.logger.info(f"Initialized result tracking for {binary_name}")
 
@@ -401,6 +436,9 @@ class MonitoringService:
             num_threads=memory_stats.get("num_threads", 0),
             complete_ledgers=self.complete_ledgers,
             ledger_count=ledger_count,
+            # Include diagnostic data if available
+            counts=self.latest_counts,
+            job_types=self.latest_job_types,
         )
 
         # Add to current result

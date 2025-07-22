@@ -73,7 +73,7 @@ class MemoryMonitorDashboard(App):
     }
     
     .timing-text {
-        width: 1.5fr;
+        width: 2fr;
         content-align: right middle;
         color: $primary;
         text-style: italic;
@@ -319,7 +319,6 @@ class MemoryMonitorDashboard(App):
         # Start update loops
         self.set_interval(0.1, self._process_queues)
         self.set_interval(1.0, self._update_memory_stats)
-        self.set_interval(5.0, self._update_counts)  # Update counts every 5 seconds
 
         # Start the test
         self.run_worker(self._start_monitoring, exclusive=True)
@@ -358,11 +357,13 @@ class MemoryMonitorDashboard(App):
         self.process_manager.subscribe_stderr(on_stderr)
 
     def _setup_state_observer(self):
-        """Set up state observer for jobs display"""
+        """Set up state observer for jobs and counts display"""
 
         def on_state_change(state: ApplicationState):
             if state.job_types and self.jobs_display:
                 self.jobs_display.update_jobs(state.job_types)
+            if state.counts and self.counts_display:
+                self.counts_display.update_counts(state.counts)
 
         self.state_manager.subscribe(on_state_change)
 
@@ -398,17 +399,6 @@ class MemoryMonitorDashboard(App):
             # Update memory graph
             if self.memory_graph and memory_mb > 0:
                 self.memory_graph.update_memory(memory_mb)
-
-    async def _update_counts(self):
-        """Update diagnostic counts"""
-        # Update counts whenever we're connected
-        if self.websocket_manager.is_connected():
-            try:
-                counts = await self.websocket_manager.get_counts()
-                if counts and self.counts_display:
-                    self.counts_display.update_counts(counts)
-            except Exception as e:
-                self.logging_service.error(f"Error getting counts: {e}")
 
     async def _start_monitoring(self):
         """Start the monitoring process"""

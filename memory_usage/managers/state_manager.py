@@ -44,6 +44,7 @@ class ApplicationState:
 
     # Server info data
     job_types: Optional[List[Dict[str, Any]]] = None
+    counts: Optional[Dict[str, Any]] = None
 
 
 class StateManager:
