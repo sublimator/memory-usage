@@ -52,7 +52,7 @@ class LoggingService:
         if handler in self._handlers:
             self._handlers.remove(handler)
 
-    def _log_with_caller_info(self, level: int, message: str):
+    def _log_with_caller_info(self, level: int, message: str, exc_info=None):
         """Log message with actual caller's file and line info"""
         # Get the caller's frame (skip this method and the public method that called it)
         frame = inspect.currentframe()
@@ -63,12 +63,12 @@ class LoggingService:
 
             # Create a log record manually with caller info
             record = self._logger.makeRecord(
-                self._logger.name, level, filename, lineno, message, args=(), exc_info=None
+                self._logger.name, level, filename, lineno, message, args=(), exc_info=exc_info
             )
             self._logger.handle(record)
         else:
             # Fallback to normal logging
-            self._logger.log(level, message)
+            self._logger.log(level, message, exc_info=exc_info)
 
     def debug(self, message: str):
         """Log debug message"""
@@ -82,9 +82,9 @@ class LoggingService:
         """Log warning message"""
         self._log_with_caller_info(logging.WARNING, message)
 
-    def error(self, message: str):
+    def error(self, message: str, exc_info=None):
         """Log error message"""
-        self._log_with_caller_info(logging.ERROR, message)
+        self._log_with_caller_info(logging.ERROR, message, exc_info=exc_info)
 
     def critical(self, message: str):
         """Log critical message"""

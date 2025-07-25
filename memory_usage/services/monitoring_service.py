@@ -92,6 +92,7 @@ class MonitoringService:
 
         # Test each binary
         for i, binary_path in enumerate(binaries):
+            self.logger.info("binary path = " + binary_path)
             if self._shutdown_event.is_set():
                 break
 
@@ -104,7 +105,7 @@ class MonitoringService:
             try:
                 await self._test_binary(binary_path, binary_name)
             except Exception as e:
-                self.logger.error(f"Error testing {binary_name}: {e}")
+                self.logger.error(f"Error testing {binary_name}: {e}", exc_info=True)
 
             # Wait between tests
             if i < len(binaries) - 1 and not self._shutdown_event.is_set():
