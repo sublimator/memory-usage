@@ -72,7 +72,7 @@ class ProcessService:
             self.logging_service.info(f"Spawning rippled binary: {self.binary_path}")
 
             env = os.environ.copy()
-            env["NO_COLOR"] = "1"
+            # env["NO_COLOR"] = "1"
 
             self.process = subprocess.Popen(
                 cmd,
