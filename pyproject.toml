@@ -1,37 +1,41 @@
-[tool.poetry]
+[project]
 name = "xahaud-memory-monitor"
 version = "0.1.0"
 description = "Memory usage monitor for xahaud/rippled binaries with Textual dashboard"
-authors = ["Nicholas Dudfield <nick@email.com>"]
+authors = [{name = "Nicholas Dudfield", email = "nick@email.com"}]
 readme = "README.md"
-packages = [{include = "memory_usage"}]
+requires-python = ">=3.13"
+dependencies = [
+    "xrpl-py>=4.2.0",
+    "pydantic>=2.11.7",
+    "psutil>=7.0.0",
+    "textual>=4.0.0",
+    "rich>=14.0.0",
+    "aiofiles>=24.1.0",
+    "dependency-injector[pydantic2]>=4.48.1",
+    "pydantic-settings>=2.10.1",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.13,<4.0"
-xrpl-py = "^4.2.0"
-pydantic = "^2.11.7"
-psutil = "^7.0.0"
-textual = "^4.0.0"
-rich = "^14.0.0"
-aiofiles = "^24.1.0"
-dependency-injector = {extras = ["pydantic2"], version = "^4.48.1"}
-pydantic-settings = "^2.10.1"
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
+    "black>=25.1.0",
+    "mypy>=1.17.0",
+    "ruff>=0.12.4",
+    "import-linter>=2.3",
+    "isort>=6.0.1",
+]
 
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.4.1"
-pytest-asyncio = "^1.1.0"
-black = "^25.1.0"
-mypy = "^1.17.0"
-ruff = "^0.12.4"
-import-linter = "^2.3"
-isort = "^6.0.1"
+[project.scripts]
+xahaud-monitor = "memory_usage.cli:run"
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.poetry.scripts]
-xahaud-monitor = "memory_usage.cli:run"
+[tool.hatch.build.targets.wheel]
+packages = ["memory_usage"]
 
 [tool.black]
 line-length = 100
