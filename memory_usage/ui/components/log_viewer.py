@@ -73,8 +73,8 @@ class ProcessOutputViewer(QueuedLogViewer):
         super().__init__(
             title="Rippled Output",
             title_style="bold green",
-            highlight=True,
-            markup=True,
+            highlight=False,  # Disable auto-highlighting
+            markup=False,  # Disable markup interpretation
             wrap=True,
             auto_scroll=True,
             id="rippled-richlog",
@@ -82,18 +82,12 @@ class ProcessOutputViewer(QueuedLogViewer):
 
     def queue_stdout(self, line: str):
         """Queue a stdout line"""
-        from rich.markup import escape
-
-        escaped_line = escape(line)
-        self.queue_message(f"[cyan][stdout][/cyan] {escaped_line}")
+        self.queue_message(line)
 
     def queue_stderr(self, line: str):
         """Queue a stderr line"""
-        from rich.markup import escape
-
-        escaped_line = escape(line)
-        self.queue_message(f"[yellow][stderr][/yellow] {escaped_line}")
+        self.queue_message(line)
 
     def queue_info(self, line: str):
         """Queue an info message"""
-        self.queue_message(f"[bold green][info][/bold green] {line}")
+        self.queue_message(line)
