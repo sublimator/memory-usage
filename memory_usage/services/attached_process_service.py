@@ -4,11 +4,15 @@ Attached process service for monitoring an existing running process
 
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
 
 import psutil
+
+# Regex to strip ANSI escape sequences
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 from ..config import Config
 
@@ -127,6 +131,8 @@ class AttachedProcessService:
                 # Show last 50 lines as history
                 history_lines = lines[-50:] if len(lines) > 50 else lines
                 for line in history_lines:
+                    # Strip ANSI escape codes
+                    line = ANSI_ESCAPE_RE.sub("", line)
                     for callback in self._stdout_callbacks:
                         try:
                             callback(line)
@@ -139,6 +145,8 @@ class AttachedProcessService:
                     line = f.readline()
                     if line:
                         line = line.rstrip("\n\r")
+                        # Strip ANSI escape codes
+                        line = ANSI_ESCAPE_RE.sub("", line)
                         # Send to stdout callbacks (debug log is effectively stdout)
                         for callback in self._stdout_callbacks:
                             try:
