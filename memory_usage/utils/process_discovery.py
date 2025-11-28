@@ -9,6 +9,8 @@ from typing import Optional
 
 import psutil
 
+from .parsers import parse_debug_logfile
+
 
 @dataclass
 class DiscoveredProcess:
@@ -43,6 +45,14 @@ class DiscoveredProcess:
             return str(config.resolve())
 
         return None
+
+    @property
+    def debug_logfile_path(self) -> Optional[str]:
+        """Get the debug log file path from the config"""
+        config = self.resolved_config_path
+        if not config:
+            return None
+        return parse_debug_logfile(config, self.working_dir)
 
 
 def get_process_cwd(pid: int) -> Optional[str]:
@@ -173,11 +183,21 @@ def display_process_menu(processes: list[DiscoveredProcess]) -> Optional[Discove
 
     print("-" * 80)
 
+    # Default to first process
+    default = 1
+
     while True:
         try:
-            choice = input(f"Select process [1-{len(processes)}] (or 'q' to quit): ").strip()
+            prompt = f"Select process [1-{len(processes)}] (default: {default}, 'q' to quit): "
+            choice = input(prompt).strip()
+
+            # Empty input = default
+            if not choice:
+                return processes[default - 1]
+
             if choice.lower() == "q":
                 return None
+
             idx = int(choice) - 1
             if 0 <= idx < len(processes):
                 return processes[idx]

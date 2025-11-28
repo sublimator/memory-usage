@@ -124,6 +124,15 @@ def run_attach_mode(args):
             websocket_url = f"ws://localhost:{DEFAULT_WEBSOCKET_PORT}"
     print(f"WebSocket: {websocket_url}")
 
+    # Get debug log file path from config
+    debug_logfile = proc.debug_logfile_path
+    if debug_logfile:
+        print(f"Debug log: {debug_logfile}")
+        if not Path(debug_logfile).exists():
+            print(f"  Warning: Debug log file does not exist yet")
+    else:
+        print("Debug log: Not configured or could not be determined")
+
     # Create configuration
     config = Config(
         rippled_config_path=config_path,
@@ -140,6 +149,7 @@ def run_attach_mode(args):
         attach_pid=proc.pid,
         attach_binary_name=proc.name,
         attach_binary_path=proc.binary_path,
+        attach_debug_logfile=debug_logfile,
     )
 
     # Configure DI container

@@ -28,6 +28,7 @@ class Config(BaseSettings):
     attach_pid: Optional[int] = Field(default=None)
     attach_binary_name: Optional[str] = Field(default=None)
     attach_binary_path: Optional[str] = Field(default=None)
+    attach_debug_logfile: Optional[str] = Field(default=None)
 
     @field_validator("api_version")
     def validate_api_version(cls, v):

@@ -3,7 +3,10 @@ Attached process service for monitoring an existing running process
 """
 
 import logging
-from typing import TYPE_CHECKING, Optional
+import os
+import threading
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 import psutil
 
@@ -35,12 +38,19 @@ class AttachedProcessService:
         self.logging_service = logging_service
         self._psutil_process: Optional[psutil.Process] = None
 
-        # Output buffers (empty for attached processes - can't capture stdout/stderr)
-        self.stdout_buffer = []
-        self.stderr_buffer = []
+        # Output buffers (we'll populate from debug log file if available)
+        self.stdout_buffer: List[str] = []
+        self.stderr_buffer: List[str] = []
 
-        # Log file path (not applicable for attached processes)
-        self.log_file_path = None
+        # Log file path - use the debug logfile from the rippled config
+        self.log_file_path = config.attach_debug_logfile
+        self._debug_log_path = config.attach_debug_logfile
+
+        # Log file tailing
+        self._stdout_callbacks: List[Callable[[str], None]] = []
+        self._stderr_callbacks: List[Callable[[str], None]] = []
+        self._log_tail_thread: Optional[threading.Thread] = None
+        self._stop_tailing = threading.Event()
 
     def start(self) -> bool:
         """Verify the process exists and start monitoring"""
@@ -60,6 +70,10 @@ class AttachedProcessService:
                     f"Current memory: {mem.get('rss', 0):.1f} MB ({mem.get('percent', 0):.1f}%)"
                 )
 
+            # Start tailing debug log file if available
+            if self._debug_log_path:
+                self._start_log_tailing()
+
             return True
 
         except psutil.NoSuchProcess:
@@ -72,8 +86,65 @@ class AttachedProcessService:
             self.logging_service.error(f"Error attaching to process: {e}")
             return False
 
+    def _start_log_tailing(self):
+        """Start a background thread to tail the debug log file"""
+        if not self._debug_log_path:
+            return
+
+        log_path = Path(self._debug_log_path)
+        if not log_path.exists():
+            self.logging_service.warning(f"Debug log file not found: {self._debug_log_path}")
+            return
+
+        self.logging_service.info(f"Tailing debug log: {self._debug_log_path}")
+
+        self._stop_tailing.clear()
+        self._log_tail_thread = threading.Thread(
+            target=self._tail_log_file,
+            args=(log_path,),
+            daemon=True,
+            name="debug-log-tail",
+        )
+        self._log_tail_thread.start()
+
+    def _tail_log_file(self, log_path: Path):
+        """Background thread to tail the log file"""
+        try:
+            # Start at end of file
+            with open(log_path, "r") as f:
+                # Seek to end
+                f.seek(0, os.SEEK_END)
+
+                while not self._stop_tailing.is_set():
+                    line = f.readline()
+                    if line:
+                        line = line.rstrip("\n\r")
+                        # Send to stdout callbacks (debug log is effectively stdout)
+                        for callback in self._stdout_callbacks:
+                            try:
+                                callback(line)
+                            except Exception as e:
+                                logger.debug(f"Callback error: {e}")
+
+                        # Also buffer it
+                        self.stdout_buffer.append(line)
+                        # Keep buffer limited
+                        if len(self.stdout_buffer) > 1000:
+                            self.stdout_buffer = self.stdout_buffer[-500:]
+                    else:
+                        # No new content, wait a bit
+                        self._stop_tailing.wait(0.1)
+
+        except Exception as e:
+            self.logging_service.error(f"Error tailing log file: {e}")
+
     def stop(self):
         """Detach from the process (does NOT stop the actual process)"""
+        # Stop log tailing
+        self._stop_tailing.set()
+        if self._log_tail_thread and self._log_tail_thread.is_alive():
+            self._log_tail_thread.join(timeout=1.0)
+
         self.logging_service.info(
             f"Detaching from process {self.pid} (process will continue running)"
         )
@@ -116,10 +187,10 @@ class AttachedProcessService:
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             return {}
 
-    def add_stdout_callback(self, callback):
-        """No-op for attached processes (can't capture stdout)"""
-        pass
+    def add_stdout_callback(self, callback: Callable[[str], None]):
+        """Register a callback for stdout (debug log) output"""
+        self._stdout_callbacks.append(callback)
 
-    def add_stderr_callback(self, callback):
-        """No-op for attached processes (can't capture stderr)"""
-        pass
+    def add_stderr_callback(self, callback: Callable[[str], None]):
+        """Register a callback for stderr output (not used for attached processes)"""
+        self._stderr_callbacks.append(callback)

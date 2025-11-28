@@ -101,6 +101,65 @@ def parse_rippled_config(config_path: str) -> Tuple[Optional[int], Optional[int]
         return None, None
 
 
+def parse_debug_logfile(config_path: str, working_dir: Optional[str] = None) -> Optional[str]:
+    """Parse rippled config to find the debug log file path.
+
+    Args:
+        config_path: Path to the rippled config file
+        working_dir: Working directory of the process (for resolving relative paths)
+
+    Returns:
+        Absolute path to the debug log file, or None if not found
+    """
+    try:
+        config_file = Path(config_path)
+        if not config_file.exists():
+            return None
+
+        with open(config_file, "r") as f:
+            content = f.read()
+
+        # Parse the [debug_logfile] section
+        in_section = False
+        for line in content.split("\n"):
+            line = line.strip()
+
+            # Skip comments and empty lines
+            if not line or line.startswith("#") or line.startswith(";"):
+                continue
+
+            # Check if entering the section
+            if line == "[debug_logfile]":
+                in_section = True
+                continue
+
+            # Check if leaving the section
+            if line.startswith("["):
+                in_section = False
+                continue
+
+            # If we're in the section, the first non-comment line is the path
+            if in_section:
+                log_path = Path(line)
+
+                # If it's an absolute path, use it directly
+                if log_path.is_absolute():
+                    return str(log_path)
+
+                # Otherwise, resolve relative to working_dir or config file's directory
+                if working_dir:
+                    resolved = Path(working_dir) / log_path
+                else:
+                    resolved = config_file.parent / log_path
+
+                return str(resolved.resolve())
+
+    except Exception as e:
+        logger.debug(f"Error parsing debug_logfile from config: {e}")
+
+    return None
+
+
 def parse_ledger_ranges(complete_ledgers: str) -> int:
     """Parse complete_ledgers range set and return total count.
 

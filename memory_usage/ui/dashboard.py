@@ -403,6 +403,8 @@ class MemoryMonitorDashboard(App):
                 f"Mode: ATTACH (PID: {self.config.attach_pid})", "bold cyan"
             )
             self.monitor_log.queue_message(f"Binary: {self.config.attach_binary_name}")
+            if self.config.attach_debug_logfile:
+                self.monitor_log.queue_message(f"Debug log: {self.config.attach_debug_logfile}")
         else:
             self.monitor_log.queue_message(
                 f"Mode: {'standalone' if self.config.standalone_mode else 'network'}"
@@ -412,9 +414,14 @@ class MemoryMonitorDashboard(App):
         self.monitor_log.queue_message("")
 
         if self.config.attach_mode:
-            self.process_output.queue_message(
-                "Attach mode: Cannot capture stdout/stderr of running process"
-            )
+            if self.config.attach_debug_logfile:
+                self.process_output.queue_message(
+                    f"Tailing debug log: {self.config.attach_debug_logfile}"
+                )
+            else:
+                self.process_output.queue_message(
+                    "Attach mode: No debug log file configured, cannot tail output"
+                )
             self.process_output.queue_message("")
         else:
             self.process_output.queue_message("Waiting to start rippled process...")
@@ -495,3 +502,12 @@ class MemoryMonitorDashboard(App):
             self.monitor_log.queue_message("Stopping rippled process...", "yellow")
             await self.monitoring_service.stop_monitoring()
             await self.state_manager.update_status("Stopped by user")
+
+    async def action_quit(self) -> None:
+        """Quit the application with proper cleanup"""
+        # Stop monitoring and cleanup
+        try:
+            await self.monitoring_service.stop_monitoring()
+        except Exception:
+            pass  # Ignore errors during shutdown
+        self.exit()
