@@ -117,6 +117,80 @@ class MonitoringService:
         await self.state_manager.update_status("All tests completed")
         self._monitoring = False
 
+    async def start_attach_monitoring(self, pid: int, name: str, binary_path: str):
+        """Start monitoring by attaching to an existing process"""
+        self._monitoring = True
+
+        # Update state
+        await self.state_manager.update_test_progress(0, 1)
+        await self.state_manager.update_status(f"Attaching to {name}...")
+
+        self.logger.info(f"Attaching to process {name} (PID: {pid})")
+
+        try:
+            await self._attach_and_monitor(pid, name, binary_path)
+        except Exception as e:
+            self.logger.error(f"Error monitoring {name}: {e}", exc_info=True)
+
+        # Update final state
+        await self.state_manager.update_test_progress(1, 1)
+        await self.state_manager.update_status("Monitoring completed")
+        self._monitoring = False
+
+    async def _attach_and_monitor(self, pid: int, name: str, binary_path: str):
+        """Attach to an existing process and monitor it"""
+        # Initialize result tracking
+        self._initialize_binary_result(binary_path, name)
+        self._test_start_time = datetime.now()
+
+        try:
+            # Attach to the process
+            process = await self.process_manager.attach_to_process(pid, name, binary_path)
+            await self.state_manager.update_process_info(name, process.pid)
+
+            # Connect to WebSocket
+            await self.websocket_manager.connect()
+
+            # Subscribe to ledger events
+            await self.websocket_manager.subscribe_to_streams(["ledger"])
+
+            # In attach mode, we assume the process is already synced
+            # Just do a quick check to get initial state
+            server_info = await self.websocket_manager.get_server_info()
+            if server_info:
+                complete_ledgers = server_info.get("complete_ledgers", "empty")
+                self.complete_ledgers = complete_ledgers
+                if complete_ledgers != "empty":
+                    self.logger.info(f"Process already synced: {complete_ledgers}")
+                    self._monitoring_start_time = datetime.now()
+                    # Set ledger close count to 1 to skip polling
+                    self.ledger_close_count = 1
+                else:
+                    self.logger.info("Process not yet synced, will wait for ledgers...")
+
+            # Run polling phase (will be quick if already synced)
+            await self._polling_phase()
+
+            # Run monitoring phase
+            if self._monitoring and not self._shutdown_event.is_set():
+                await self._monitoring_phase()
+
+            # Finalize results
+            self._finalize_binary_result("completed")
+
+        except Exception as e:
+            self.logger.error(f"Error during {name} monitoring: {e}")
+            self._finalize_binary_result("error", str(e))
+
+        finally:
+            # Save results
+            self._save_binary_result()
+
+            # Cleanup (detach, don't stop)
+            await self.process_manager.stop_current()
+            await self.websocket_manager.unsubscribe_from_streams(["ledger"])
+            await self.state_manager.update_process_info(None, None)
+
     async def stop_monitoring(self):
         """Stop monitoring"""
         self.logger.info("Stopping monitoring...")

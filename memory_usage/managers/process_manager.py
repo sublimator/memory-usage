@@ -5,15 +5,19 @@ Process management for rippled binaries
 import asyncio
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, List, Optional, Union
 
 from ..config import Config
+from ..services.attached_process_service import AttachedProcessService
 from ..services.process_service import ProcessService
 
 if TYPE_CHECKING:
     from ..services.logging_service import LoggingService
 
 logger = logging.getLogger(__name__)
+
+# Type alias for either process type
+AnyProcessService = Union[ProcessService, AttachedProcessService]
 
 
 class ProcessManager:
@@ -24,10 +28,11 @@ class ProcessManager:
             raise ValueError("logging_service is required")
         self.config = config
         self.logging_service = logging_service
-        self.current_process: Optional[ProcessService] = None
+        self.current_process: Optional[AnyProcessService] = None
         self._lock = asyncio.Lock()
         self._stdout_callbacks: List[Callable[[str], None]] = []
         self._stderr_callbacks: List[Callable[[str], None]] = []
+        self._attach_mode = False
 
     def subscribe_stdout(self, callback: Callable[[str], None]):
         """Subscribe to stdout output"""
@@ -43,7 +48,7 @@ class ProcessManager:
         if self.current_process:
             self.current_process.add_stderr_callback(callback)
 
-    async def start_process(self, binary_path: str, name: str) -> ProcessService:
+    async def start_process(self, binary_path: str, name: str) -> AnyProcessService:
         """Start a new process"""
         async with self._lock:
             # Stop any existing process
@@ -55,6 +60,7 @@ class ProcessManager:
             self.current_process = ProcessService(
                 binary_path, name, self.config, self.logging_service
             )
+            self._attach_mode = False
 
             # Hook up output callbacks
             for callback in self._stdout_callbacks:
@@ -69,17 +75,57 @@ class ProcessManager:
                 self.current_process = None
                 raise RuntimeError(f"Failed to start process {name}")
 
+    async def attach_to_process(
+        self, pid: int, name: str, binary_path: str
+    ) -> AttachedProcessService:
+        """Attach to an existing running process"""
+        async with self._lock:
+            # Stop any existing process (but don't stop attached processes)
+            if self.current_process and self.current_process.is_alive():
+                if not self._attach_mode:
+                    logger.info(f"Stopping existing process {self.current_process.name}")
+                    self.current_process.stop()
+                else:
+                    logger.info(f"Detaching from existing process {self.current_process.name}")
+
+            # Create attached process service
+            self.current_process = AttachedProcessService(
+                pid, name, binary_path, self.config, self.logging_service
+            )
+            self._attach_mode = True
+
+            # Hook up output callbacks (no-ops for attached processes)
+            for callback in self._stdout_callbacks:
+                self.current_process.add_stdout_callback(callback)
+            for callback in self._stderr_callbacks:
+                self.current_process.add_stderr_callback(callback)
+
+            if self.current_process.start():
+                logger.info(f"Successfully attached to {name} (PID: {pid})")
+                return self.current_process
+            else:
+                self.current_process = None
+                raise RuntimeError(f"Failed to attach to process {name} (PID: {pid})")
+
     async def stop_current(self):
-        """Stop the current process"""
+        """Stop the current process (or detach if in attach mode)"""
         async with self._lock:
             if self.current_process:
-                logger.info(f"Stopping process {self.current_process.name}")
+                if self._attach_mode:
+                    logger.info(f"Detaching from process {self.current_process.name}")
+                else:
+                    logger.info(f"Stopping process {self.current_process.name}")
                 self.current_process.stop()
                 self.current_process = None
+                self._attach_mode = False
 
-    def get_current_process(self) -> Optional[ProcessService]:
+    def get_current_process(self) -> Optional[AnyProcessService]:
         """Get the current process"""
         return self.current_process
+
+    def is_attach_mode(self) -> bool:
+        """Check if we're in attach mode"""
+        return self._attach_mode
 
     def is_process_alive(self) -> bool:
         """Check if current process is alive"""

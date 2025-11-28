@@ -23,6 +23,12 @@ class Config(BaseSettings):
     # Binary selection
     specified_binaries: Optional[List[str]] = Field(default=None)
 
+    # Attach mode (connect to running process)
+    attach_mode: bool = Field(default=False)
+    attach_pid: Optional[int] = Field(default=None)
+    attach_binary_name: Optional[str] = Field(default=None)
+    attach_binary_path: Optional[str] = Field(default=None)
+
     @field_validator("api_version")
     def validate_api_version(cls, v):
         """Validate API version."""

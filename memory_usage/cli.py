@@ -11,7 +11,13 @@ from pathlib import Path
 
 from .config import Config
 from .container import Container
-from .utils import detect_xahau, parse_rippled_config
+from .utils import (
+    detect_xahau,
+    display_process_menu,
+    find_rippled_processes,
+    get_process_by_pid,
+    parse_rippled_config,
+)
 
 # Default Configuration
 DEFAULT_RIPPLED_CONFIG_PATH = "niq-conf/xahaud.cfg"
@@ -67,6 +73,95 @@ def tail_logs():
     except KeyboardInterrupt:
         print("\nStopped tailing log file")
         sys.exit(0)
+
+
+def run_attach_mode(args):
+    """Run in attach mode - connect to a running process"""
+    # Find or select process
+    if args.pid:
+        # Specific PID provided
+        proc = get_process_by_pid(args.pid)
+        if not proc:
+            print(f"Error: No process found with PID {args.pid}")
+            sys.exit(1)
+        print(f"Attaching to PID {proc.pid}: {proc.name}")
+    else:
+        # Interactive menu
+        processes = find_rippled_processes()
+        proc = display_process_menu(processes)
+        if not proc:
+            sys.exit(0)
+
+    # Get config path
+    config_path = proc.resolved_config_path
+    if not config_path:
+        print(f"Warning: Could not find config file for process {proc.pid}")
+        print(f"  Config from cmdline: {proc.config_path}")
+        print(f"  Working dir: {proc.working_dir}")
+        if not args.websocket_url:
+            print("Error: Cannot determine WebSocket URL. Please provide --websocket-url")
+            sys.exit(1)
+        config_path = proc.config_path or "unknown"
+
+    print(f"Config: {config_path}")
+
+    # Determine API version
+    api_version = args.api_version
+    if not api_version:
+        if config_path and detect_xahau(config_path):
+            api_version = 1
+        else:
+            api_version = DEFAULT_API_VERSION
+    print(f"API version: {api_version}")
+
+    # Determine WebSocket URL
+    websocket_url = args.websocket_url
+    if not websocket_url:
+        ws_port, rpc_port = parse_rippled_config(config_path)
+        if ws_port:
+            websocket_url = f"ws://localhost:{ws_port}"
+        else:
+            websocket_url = f"ws://localhost:{DEFAULT_WEBSOCKET_PORT}"
+    print(f"WebSocket: {websocket_url}")
+
+    # Create configuration
+    config = Config(
+        rippled_config_path=config_path,
+        websocket_url=websocket_url,
+        api_version=api_version,
+        standalone_mode=False,
+        test_duration_minutes=args.duration,
+        specified_binaries=None,
+        build_dir="",
+        output_dir=args.output_dir,
+        poll_interval=1,
+        # Attach mode specific
+        attach_mode=True,
+        attach_pid=proc.pid,
+        attach_binary_name=proc.name,
+        attach_binary_path=proc.binary_path,
+    )
+
+    # Configure DI container
+    container = Container()
+    container.config.override(config)
+    container.wire(
+        modules=[
+            "memory_usage.ui.dashboard",
+            "memory_usage.services.monitoring_service",
+            "memory_usage.services.logging_service",
+            "memory_usage.managers.process_manager",
+            "memory_usage.managers.websocket_manager",
+            "memory_usage.managers.state_manager",
+        ]
+    )
+
+    # Import and run dashboard
+    from .ui.dashboard import MemoryMonitorDashboard
+
+    # Create and run the dashboard
+    app = MemoryMonitorDashboard()
+    app.run()
 
 
 def run():
@@ -140,6 +235,45 @@ def run():
     # Logs command
     subparsers.add_parser("logs", help="Tail the latest process output log file")
 
+    # Attach command
+    attach_parser = subparsers.add_parser(
+        "attach",
+        help="Attach to a running xahaud/rippled process",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    attach_parser.add_argument(
+        "--pid",
+        "-p",
+        type=int,
+        help="PID of the process to attach to (interactive menu if not specified)",
+    )
+    attach_parser.add_argument(
+        "--duration",
+        "-d",
+        type=int,
+        default=5,
+        help="Monitoring duration in minutes (default: 5)",
+    )
+    attach_parser.add_argument(
+        "--websocket-url",
+        "-w",
+        type=str,
+        help="Override websocket URL (e.g. ws://localhost:6009)",
+    )
+    attach_parser.add_argument(
+        "--api-version",
+        "-v",
+        type=int,
+        choices=[1, 2],
+        help="API version to use (auto-detected if not specified)",
+    )
+    attach_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="memory_monitor_results",
+        help="Directory for output files (default: memory_monitor_results)",
+    )
+
     # Parse args
     args = parser.parse_args()
 
@@ -152,6 +286,10 @@ def run():
     # Handle commands
     if args.command == "logs":
         tail_logs()
+        return
+
+    if args.command == "attach":
+        run_attach_mode(args)
         return
 
     # Handle monitor command

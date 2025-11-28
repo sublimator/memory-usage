@@ -397,14 +397,28 @@ class MemoryMonitorDashboard(App):
         self.monitor_log.queue_message(f"Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self.monitor_log.queue_message(f"Config: {self.config.rippled_config_path}")
         self.monitor_log.queue_message(f"WebSocket: {self.config.websocket_url}")
-        self.monitor_log.queue_message(
-            f"Mode: {'standalone' if self.config.standalone_mode else 'network'}"
-        )
+
+        if self.config.attach_mode:
+            self.monitor_log.queue_message(
+                f"Mode: ATTACH (PID: {self.config.attach_pid})", "bold cyan"
+            )
+            self.monitor_log.queue_message(f"Binary: {self.config.attach_binary_name}")
+        else:
+            self.monitor_log.queue_message(
+                f"Mode: {'standalone' if self.config.standalone_mode else 'network'}"
+            )
+
         self.monitor_log.queue_message(f"API Version: {self.config.api_version}")
         self.monitor_log.queue_message("")
 
-        self.process_output.queue_message("Waiting to start rippled process...")
-        self.process_output.queue_message("")
+        if self.config.attach_mode:
+            self.process_output.queue_message(
+                "Attach mode: Cannot capture stdout/stderr of running process"
+            )
+            self.process_output.queue_message("")
+        else:
+            self.process_output.queue_message("Waiting to start rippled process...")
+            self.process_output.queue_message("")
 
     def _process_queues(self):
         """Process all message queues"""
@@ -428,15 +442,27 @@ class MemoryMonitorDashboard(App):
     async def _start_monitoring(self):
         """Start the monitoring process"""
         try:
-            # Find binaries
-            binaries = self.process_manager.find_binaries()
-            if not binaries:
-                self.logging_service.error("No binaries found!")
-                await self.state_manager.update_status("Error: No binaries found")
-                return
+            # Check if we're in attach mode
+            if self.config.attach_mode:
+                # Attach mode - connect to existing process
+                self.logging_service.info(
+                    f"Attach mode: connecting to PID {self.config.attach_pid}"
+                )
+                await self.monitoring_service.start_attach_monitoring(
+                    pid=self.config.attach_pid,
+                    name=self.config.attach_binary_name,
+                    binary_path=self.config.attach_binary_path,
+                )
+            else:
+                # Normal mode - find and start binaries
+                binaries = self.process_manager.find_binaries()
+                if not binaries:
+                    self.logging_service.error("No binaries found!")
+                    await self.state_manager.update_status("Error: No binaries found")
+                    return
 
-            # Start monitoring
-            await self.monitoring_service.start_monitoring(binaries)
+                # Start monitoring
+                await self.monitoring_service.start_monitoring(binaries)
 
         except Exception as e:
             self.logging_service.error(f"Error during monitoring: {e}")
@@ -460,7 +486,12 @@ class MemoryMonitorDashboard(App):
         self.monitor_log.queue_message(f">>> {status} <<<", "bold yellow")
 
     async def action_stop_process(self) -> None:
-        """Stop the current rippled process"""
-        self.monitor_log.queue_message("Stopping rippled process...", "yellow")
-        await self.monitoring_service.stop_monitoring()
-        await self.state_manager.update_status("Stopped by user")
+        """Stop the current rippled process (or detach if in attach mode)"""
+        if self.config.attach_mode:
+            self.monitor_log.queue_message("Detaching from process...", "yellow")
+            await self.monitoring_service.stop_monitoring()
+            await self.state_manager.update_status("Detached by user")
+        else:
+            self.monitor_log.queue_message("Stopping rippled process...", "yellow")
+            await self.monitoring_service.stop_monitoring()
+            await self.state_manager.update_status("Stopped by user")
