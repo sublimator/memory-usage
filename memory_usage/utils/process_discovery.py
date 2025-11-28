@@ -167,6 +167,12 @@ def display_process_menu(processes: list[DiscoveredProcess]) -> Optional[Discove
         print("No running xahaud/rippled processes found.")
         return None
 
+    # If only one process, auto-select it
+    if len(processes) == 1:
+        proc = processes[0]
+        print(f"Found 1 process: {proc.name} (PID: {proc.pid}, {proc.memory_mb:.1f} MB)")
+        return proc
+
     print("\nRunning xahaud/rippled processes:")
     print("-" * 80)
 
