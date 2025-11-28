@@ -110,11 +110,31 @@ class AttachedProcessService:
     def _tail_log_file(self, log_path: Path):
         """Background thread to tail the log file"""
         try:
-            # Start at end of file
             with open(log_path, "r") as f:
-                # Seek to end
+                # First, show last N lines of history (like tail -f)
+                # Read entire file and get last 50 lines
                 f.seek(0, os.SEEK_END)
+                file_size = f.tell()
 
+                # Read last chunk to find recent lines
+                chunk_size = min(file_size, 64 * 1024)  # 64KB max
+                f.seek(max(0, file_size - chunk_size))
+
+                # Read the chunk and split into lines
+                chunk = f.read()
+                lines = chunk.splitlines()
+
+                # Show last 50 lines as history
+                history_lines = lines[-50:] if len(lines) > 50 else lines
+                for line in history_lines:
+                    for callback in self._stdout_callbacks:
+                        try:
+                            callback(line)
+                        except Exception as e:
+                            logger.debug(f"Callback error: {e}")
+                    self.stdout_buffer.append(line)
+
+                # Now tail for new content
                 while not self._stop_tailing.is_set():
                     line = f.readline()
                     if line:

@@ -101,15 +101,15 @@ def parse_rippled_config(config_path: str) -> Tuple[Optional[int], Optional[int]
         return None, None
 
 
-def parse_debug_logfile(config_path: str, working_dir: Optional[str] = None) -> Optional[str]:
+def parse_debug_logfile(config_path: str) -> Optional[str]:
     """Parse rippled config to find the debug log file path.
 
     Args:
         config_path: Path to the rippled config file
-        working_dir: Working directory of the process (for resolving relative paths)
 
     Returns:
         Absolute path to the debug log file, or None if not found
+        (relative paths are resolved relative to the config file's directory)
     """
     try:
         config_file = Path(config_path)
@@ -146,12 +146,8 @@ def parse_debug_logfile(config_path: str, working_dir: Optional[str] = None) -> 
                 if log_path.is_absolute():
                     return str(log_path)
 
-                # Otherwise, resolve relative to working_dir or config file's directory
-                if working_dir:
-                    resolved = Path(working_dir) / log_path
-                else:
-                    resolved = config_file.parent / log_path
-
+                # Relative paths in rippled config are relative to the config file's directory
+                resolved = config_file.parent / log_path
                 return str(resolved.resolve())
 
     except Exception as e:

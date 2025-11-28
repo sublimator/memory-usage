@@ -52,7 +52,7 @@ class DiscoveredProcess:
         config = self.resolved_config_path
         if not config:
             return None
-        return parse_debug_logfile(config, self.working_dir)
+        return parse_debug_logfile(config)
 
 
 def get_process_cwd(pid: int) -> Optional[str]:
