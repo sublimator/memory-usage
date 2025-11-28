@@ -370,6 +370,7 @@ class MemoryMonitorDashboard(App):
 
     def _setup_state_observer(self):
         """Set up state observer for jobs, counts, and catalogue display"""
+        self._last_pid = None  # Track last seen PID to detect process starts
 
         def on_state_change(state: ApplicationState):
             if state.job_types and self.jobs_display:
@@ -378,6 +379,16 @@ class MemoryMonitorDashboard(App):
                 self.counts_display.update_counts(state.counts)
             if state.catalogue_status and self.catalogue_display:
                 self.catalogue_display.update_catalogue_status(state.catalogue_status)
+
+            # Detect new process start
+            if state.current_pid and state.current_pid != self._last_pid:
+                self._last_pid = state.current_pid
+                # Display log file path in process output viewer
+                log_path = self.process_manager.get_log_file_path()
+                if log_path:
+                    self.process_output.queue_info("")
+                    self.process_output.queue_info(f"Process output logging to: {log_path}")
+                    self.process_output.queue_info("")
 
         self.state_manager.subscribe(on_state_change)
 

@@ -7,8 +7,8 @@ from .process_manager import ProcessManager
 from .websocket_manager import WebSocketManager
 
 __all__ = [
-    'StateManager',
-    'ApplicationState',
-    'ProcessManager',
-    'WebSocketManager',
+    "StateManager",
+    "ApplicationState",
+    "ProcessManager",
+    "WebSocketManager",
 ]

@@ -97,7 +97,7 @@ class MonitoringService:
                 break
 
             binary_name = Path(binary_path).name
-            self.logger.info(f"Starting test {i+1}/{len(binaries)}: {binary_name}")
+            self.logger.info(f"Starting test {i + 1}/{len(binaries)}: {binary_name}")
 
             await self.state_manager.update_test_progress(i, len(binaries))
             await self.state_manager.update_status(f"Testing {binary_name}...")

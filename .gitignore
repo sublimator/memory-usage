@@ -152,3 +152,7 @@ ehthumbs.db
 Thumbs.db
 
 .claude
+
+# Memory monitor output
+memory_monitor_results/
+.memory-usage/

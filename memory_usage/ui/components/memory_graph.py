@@ -122,7 +122,7 @@ class MemoryGraph(Vertical):
                 # Update markers based on actual span
                 if actual_span > 0:
                     self.query_one("#time-start", Static).update(f"-{int(actual_span)}s")
-                    self.query_one("#time-mid", Static).update(f"-{int(actual_span/2)}s")
+                    self.query_one("#time-mid", Static).update(f"-{int(actual_span / 2)}s")
                 else:
                     self.query_one("#time-start", Static).update("0s")
                     self.query_one("#time-mid", Static).update("0s")

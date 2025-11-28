@@ -8,6 +8,7 @@ import select
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
 
@@ -47,6 +48,11 @@ class ProcessService:
         self.stdout_callbacks: List[Callable[[str], None]] = []
         self.stderr_callbacks: List[Callable[[str], None]] = []
 
+        # File logging
+        self.log_file_path: Optional[Path] = None
+        self.log_file = None
+        self._log_lock = threading.Lock()
+
     def add_stdout_callback(self, callback: Callable[[str], None]):
         """Add a callback for stdout lines"""
         self.stdout_callbacks.append(callback)
@@ -54,6 +60,41 @@ class ProcessService:
     def add_stderr_callback(self, callback: Callable[[str], None]):
         """Add a callback for stderr lines"""
         self.stderr_callbacks.append(callback)
+
+    def _setup_log_file(self) -> Path:
+        """Setup log file for process output"""
+        # Create .memory-usage directory in current working directory
+        log_dir = Path.cwd() / ".memory-usage"
+        log_dir.mkdir(exist_ok=True)
+
+        # Create log file with timestamp and PID
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_filename = f"{timestamp}-{self.pid}.log"
+        log_path = log_dir / log_filename
+
+        # Open log file for writing
+        self.log_file_path = log_path
+        self.log_file = open(log_path, "w", buffering=1)  # Line buffered
+
+        # Write header
+        self.log_file.write(f"# Rippled Process Output Log\n")
+        self.log_file.write(f"# Binary: {self.binary_path}\n")
+        self.log_file.write(f"# Name: {self.name}\n")
+        self.log_file.write(f"# PID: {self.pid}\n")
+        self.log_file.write(f"# Started: {datetime.now().isoformat()}\n")
+        self.log_file.write(f"#" + "=" * 78 + "\n\n")
+
+        return log_path
+
+    def _write_to_log(self, stream: str, line: str):
+        """Write a line to the log file"""
+        if self.log_file:
+            with self._log_lock:
+                try:
+                    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    self.log_file.write(f"[{timestamp}] [{stream}] {line}\n")
+                except Exception as e:
+                    logger.error(f"Error writing to log file: {e}")
 
     def start(self) -> bool:
         """Start the rippled process"""
@@ -72,7 +113,11 @@ class ProcessService:
             self.logging_service.info(f"Spawning rippled binary: {self.binary_path}")
 
             env = os.environ.copy()
-            # env["NO_COLOR"] = "1"
+            # Disable color output - try multiple approaches for compatibility
+            env["NO_COLOR"] = "1"
+            env["TERM"] = "dumb"
+            env["CLICOLOR"] = "0"
+            env["CLICOLOR_FORCE"] = "0"
 
             self.process = subprocess.Popen(
                 cmd,
@@ -86,12 +131,17 @@ class ProcessService:
             self.pid = self.process.pid
             logger.info(f"Started {self.name} with PID: {self.pid}")
 
+            # Setup log file for process output
+            log_path = self._setup_log_file()
+            self.logging_service.info(f"Process output logging to: {log_path}")
+
             # Give it a moment to start
             time.sleep(2)
 
             if self.process.poll() is not None:
                 stdout, stderr = self.process.communicate()
                 logger.error(f"Failed to start {self.name}: {stderr}")
+                self._close_log_file()
                 return False
 
             # Start output capture thread
@@ -127,6 +177,20 @@ class ProcessService:
 
             except Exception as e:
                 logger.error(f"Error stopping {self.name}: {e}")
+
+        # Close log file
+        self._close_log_file()
+
+    def _close_log_file(self):
+        """Close the log file"""
+        if self.log_file:
+            with self._log_lock:
+                try:
+                    self.log_file.write(f"\n# Process ended: {datetime.now().isoformat()}\n")
+                    self.log_file.close()
+                    self.log_file = None
+                except Exception as e:
+                    logger.error(f"Error closing log file: {e}")
 
     def is_alive(self) -> bool:
         """Check if the process is still running"""
@@ -182,6 +246,9 @@ class ProcessService:
                             if len(self.stdout_buffer) > 100:
                                 self.stdout_buffer.pop(0)
 
+                            # Write to log file
+                            self._write_to_log("stdout", line)
+
                             # Notify callbacks
                             for callback in self.stdout_callbacks:
                                 try:
@@ -196,6 +263,9 @@ class ProcessService:
                             self.stderr_buffer.append(line)
                             if len(self.stderr_buffer) > 100:
                                 self.stderr_buffer.pop(0)
+
+                            # Write to log file
+                            self._write_to_log("stderr", line)
 
                             # Notify callbacks
                             for callback in self.stderr_callbacks:

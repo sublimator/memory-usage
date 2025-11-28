@@ -4,6 +4,9 @@ Command-line interface for Xahaud Memory Monitor
 """
 
 import argparse
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from .config import Config
@@ -35,66 +38,124 @@ def list_binaries(build_dir: str = "build"):
         print(f"Build directory {build_dir} does not exist")
 
 
+def tail_logs():
+    """Tail the latest log file"""
+    log_dir = Path.cwd() / ".memory-usage"
+
+    if not log_dir.exists():
+        print(f"Error: Log directory {log_dir} does not exist")
+        print("No logs have been created yet. Run xahaud-monitor first.")
+        sys.exit(1)
+
+    # Find all .log files
+    log_files = list(log_dir.glob("*.log"))
+
+    if not log_files:
+        print(f"Error: No log files found in {log_dir}")
+        sys.exit(1)
+
+    # Sort by modification time, newest first
+    log_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    latest_log = log_files[0]
+
+    print(f"Tailing latest log: {latest_log}")
+    print("-" * 80)
+
+    # Run tail -f on the latest log
+    try:
+        subprocess.run(["tail", "-f", str(latest_log)])
+    except KeyboardInterrupt:
+        print("\nStopped tailing log file")
+        sys.exit(0)
+
+
 def run():
     """Entry point for the CLI"""
-    # Parse arguments
-    parser = argparse.ArgumentParser(description="Monitor rippled binary memory usage")
-    parser.add_argument(
+    # Parse arguments with subcommands
+    parser = argparse.ArgumentParser(
+        description="Monitor rippled binary memory usage",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Monitor command (default)
+    monitor_parser = subparsers.add_parser(
+        "monitor",
+        help="Start memory monitoring (default)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    monitor_parser.add_argument(
         "--duration",
         "-d",
         type=int,
         default=5,
         help="Test duration in minutes for each binary (default: 5)",
     )
-    parser.add_argument(
+    monitor_parser.add_argument(
         "--binaries",
         "-b",
         nargs="+",
         help="Specific binaries to test (e.g. rippled-compact-exact rippled-normal)",
     )
-    parser.add_argument(
+    monitor_parser.add_argument(
         "--list", "-l", action="store_true", help="List available binaries and exit"
     )
-    parser.add_argument(
+    monitor_parser.add_argument(
         "--config",
         "-c",
         type=str,
         default=DEFAULT_RIPPLED_CONFIG_PATH,
         help=f"Path to rippled config file (default: {DEFAULT_RIPPLED_CONFIG_PATH})",
     )
-    parser.add_argument(
+    monitor_parser.add_argument(
         "--websocket-url", "-w", type=str, help="Override websocket URL (e.g. ws://localhost:6009)"
     )
-    parser.add_argument(
+    monitor_parser.add_argument(
         "--api-version",
         "-v",
         type=int,
         choices=[1, 2],
         help="API version to use (auto-detected if not specified)",
     )
-    parser.add_argument(
+    monitor_parser.add_argument(
         "--standalone",
         "-s",
         action="store_true",
         help="Run rippled in standalone mode (mutually exclusive with --net)",
     )
-    parser.add_argument(
+    monitor_parser.add_argument(
         "--build-dir",
         type=str,
         default="build",
         help="Directory containing rippled binaries (default: build)",
     )
-    parser.add_argument(
+    monitor_parser.add_argument(
         "--output-dir",
         type=str,
         default="memory_monitor_results",
         help="Directory for output files (default: memory_monitor_results)",
     )
 
+    # Logs command
+    subparsers.add_parser("logs", help="Tail the latest process output log file")
+
+    # Parse args
     args = parser.parse_args()
 
-    # Handle --list command
-    if args.list:
+    # Default to monitor if no command specified (backwards compatibility)
+    if args.command is None:
+        args.command = "monitor"
+        # Re-parse with monitor defaults
+        args = monitor_parser.parse_args(sys.argv[1:])
+
+    # Handle commands
+    if args.command == "logs":
+        tail_logs()
+        return
+
+    # Handle monitor command
+    if hasattr(args, "list") and args.list:
         list_binaries(args.build_dir)
         return
 

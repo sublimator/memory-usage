@@ -91,6 +91,12 @@ class ProcessManager:
             return self.current_process.get_memory_usage()
         return {}
 
+    def get_log_file_path(self) -> Optional[str]:
+        """Get the log file path for the current process"""
+        if self.current_process and self.current_process.log_file_path:
+            return str(self.current_process.log_file_path)
+        return None
+
     def find_binaries(self) -> List[str]:
         """Find available rippled binaries"""
         if self.config.specified_binaries:

@@ -93,3 +93,7 @@ class ProcessOutputViewer(QueuedLogViewer):
 
         escaped_line = escape(line)
         self.queue_message(f"[yellow][stderr][/yellow] {escaped_line}")
+
+    def queue_info(self, line: str):
+        """Queue an info message"""
+        self.queue_message(f"[bold green][info][/bold green] {line}")
