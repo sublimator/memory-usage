@@ -38,13 +38,13 @@ class MemoryMonitorDashboard(App):
     Screen {
         background: $surface;
     }
-    
+
     #status-bar-container {
         dock: top;
         height: 3;
         width: 100%;
     }
-    
+
     #status-bar {
         height: 3;
         background: $panel;
@@ -53,88 +53,84 @@ class MemoryMonitorDashboard(App):
         width: 100%;
         layout: horizontal;
     }
-    
+
     .status-text {
         width: 1fr;
         content-align: left middle;
         color: $text;
         text-style: bold;
     }
-    
+
     .memory-text {
         width: 1.5fr;
         content-align: center middle;
         color: $success;
     }
-    
+
     .ledgers-text {
         width: 3fr;
         content-align: center middle;
         color: $warning;
     }
-    
+
     .timing-text {
         width: 2fr;
         content-align: right middle;
         color: $primary;
         text-style: italic;
     }
-    
+
     #main-container {
         height: 100%;
         width: 100%;
-    }
-    
-    #top-panel {
-        height: 3fr;
-        width: 100%;
         layout: horizontal;
     }
-    
-    #monitor-log {
+
+    #left-panel {
         width: 2fr;
+        height: 100%;
+        layout: vertical;
+    }
+
+    #monitor-log {
+        height: 1fr;
         border: solid $primary;
         padding: 1;
     }
-    
+
+    #rippled-output {
+        height: 1fr;
+        border: solid $secondary;
+        padding: 1;
+    }
+
     #right-panel {
         width: 1fr;
         height: 100%;
         layout: vertical;
     }
-    
+
     CountsDisplay {
         height: 2fr;
         border: solid $accent;
         padding: 1;
         background: $surface;
     }
-    
+
     JobsDisplay {
         height: 1fr;
         border: solid $warning;
         padding: 1;
         background: $surface;
     }
-    
+
     CatalogueStatusDisplay {
         height: 1fr;
         border: solid $secondary;
         padding: 1;
         background: $surface;
     }
-    
-    #bottom-section {
-        height: 1fr;
-        layout: vertical;
-    }
-    
-    #rippled-output {
-        height: 1fr;
-        border: solid $secondary;
-        padding: 1;
-    }
-    
+
     #memory-graph {
         dock: bottom;
         height: 17;
@@ -282,35 +278,31 @@ class MemoryMonitorDashboard(App):
         self.status_bar = StatusBar(self.state_manager)
         yield self.status_bar
 
-        with Vertical(id="main-container"):
-            # Top half - Split horizontally
-            with Horizontal(id="top-panel"):
-                # Left 2/3 - Memory monitor logs
+        with Horizontal(id="main-container"):
+            # Left 2/3 - Vertical split for monitor logs and rippled output
+            with Vertical(id="left-panel"):
                 with VerticalScroll(id="monitor-log"):
                     self.monitor_log = MonitorLogViewer()
                     yield self.monitor_log
 
-                # Right 1/3 - Split vertically for counts, jobs, and catalogue
-                with Vertical(id="right-panel"):
-                    self.counts_display = CountsDisplay()
-                    yield self.counts_display
-
-                    self.jobs_display = JobsDisplay()
-                    yield self.jobs_display
-
-                    self.catalogue_display = CatalogueStatusDisplay()
-                    yield self.catalogue_display
-
-            # Bottom section - Rippled output and memory graph
-            with Vertical(id="bottom-section"):
-                # Rippled output
                 with VerticalScroll(id="rippled-output"):
                     self.process_output = ProcessOutputViewer()
                     yield self.process_output
 
-                # Memory graph footer
-                self.memory_graph = MemoryGraph()
-                yield self.memory_graph
+            # Right 1/3 - Counts, jobs, and catalogue
+            with Vertical(id="right-panel"):
+                self.counts_display = CountsDisplay()
+                yield self.counts_display
+
+                self.jobs_display = JobsDisplay()
+                yield self.jobs_display
+
+                self.catalogue_display = CatalogueStatusDisplay()
+                yield self.catalogue_display
+
+        # Memory graph at the bottom
+        self.memory_graph = MemoryGraph()
+        yield self.memory_graph
 
         yield Footer()
 
