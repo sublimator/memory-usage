@@ -166,12 +166,16 @@ class AttachedProcessService:
         except Exception as e:
             self.logging_service.error(f"Error tailing log file: {e}")
 
-    def stop(self):
-        """Detach from the process (does NOT stop the actual process)"""
+    def stop(self, wait: bool = True):
+        """Detach from the process (does NOT stop the actual process).
+
+        ``wait`` is accepted for interface parity with ProcessService but has
+        little effect here — the log-tail thread already uses a 1s join.
+        """
         # Stop log tailing
         self._stop_tailing.set()
         if self._log_tail_thread and self._log_tail_thread.is_alive():
-            self._log_tail_thread.join(timeout=1.0)
+            self._log_tail_thread.join(timeout=1.0 if wait else 0.1)
 
         self.logging_service.info(
             f"Detaching from process {self.pid} (process will continue running)"

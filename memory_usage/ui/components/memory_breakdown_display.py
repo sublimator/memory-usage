@@ -51,7 +51,7 @@ class MemoryBreakdownDisplay(VerticalScroll):
 
     def _format(self, b: Dict[str, Any]) -> Table:
         total = float(b.get("total_rss_mb") or 0.0)
-        anon = float(b.get("anonymous_mb") or 0.0)
+        anon = b.get("anonymous_mb")
         pss = b.get("pss_mb")
         private_dirty = b.get("private_dirty_mb")
         swap = b.get("swap_mb")
@@ -59,6 +59,7 @@ class MemoryBreakdownDisplay(VerticalScroll):
         shared_lib = float(b.get("shared_lib_mb") or 0.0)
         other_file = float(b.get("other_file_mb") or 0.0)
         source = b.get("source") or "?"
+        note = b.get("note") or ""
 
         def pct(v: Optional[float]) -> str:
             if v is None:
@@ -75,7 +76,11 @@ class MemoryBreakdownDisplay(VerticalScroll):
             f"[bold]Aggregates[/bold] [dim]({source})[/dim]", "", "", style="bold magenta"
         )
         table.add_row("  Total RSS", _format_mb(total), "")
-        table.add_row("  Anonymous (heap/stack)", _format_mb(anon), pct(anon))
+        if anon is not None:
+            anon_f = float(anon)
+            table.add_row("  Anonymous (heap/stack)", _format_mb(anon_f), pct(anon_f))
+        else:
+            table.add_row("  Anonymous (heap/stack)", "[dim]unavailable[/dim]", "-")
         if pss is not None:
             table.add_row("  Pss (proportional)", _format_mb(float(pss)), pct(float(pss)))
         if private_dirty is not None:
@@ -84,6 +89,8 @@ class MemoryBreakdownDisplay(VerticalScroll):
             )
         if swap is not None and float(swap) > 0:
             table.add_row("  Swap", _format_mb(float(swap)), "")
+        if note:
+            table.add_row(f"  [dim]{note}[/dim]", "", "")
 
         # Per-category (populated from smaps on Linux; macOS lumps everything
         # non-anon into other_file)

@@ -154,8 +154,26 @@ class ProcessService:
             self.logging_service.error(f"Error starting {self.name}: {e}", exc_info=True)
             return False
 
-    def stop(self):
-        """Stop the rippled process"""
+    def stop(self, wait: bool = True):
+        """Stop the rippled process.
+
+        When ``wait`` is False we send SIGTERM and return immediately without
+        reaping or joining the output thread. Appropriate for action_quit
+        where we want the UI gone now; the child cleans up on its own and
+        the OS reaps it when our Python process exits. With ``wait=True``
+        we do the full graceful shutdown + SIGKILL escalation.
+        """
+        if not wait:
+            if self.process:
+                try:
+                    logger.info(f"Fast-stop {self.name} (SIGTERM, no wait)")
+                    self.process.terminate()
+                except Exception as e:
+                    logger.error(f"Error sending SIGTERM to {self.name}: {e}")
+            self.stop_output_capture.set()
+            self._close_log_file()
+            return
+
         # Stop output capture thread first
         if self.output_thread:
             self.stop_output_capture.set()

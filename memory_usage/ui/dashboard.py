@@ -514,15 +514,19 @@ class MemoryMonitorDashboard(App):
     async def action_quit(self) -> None:
         """Quit the application with proper cleanup.
 
-        Cap cleanup at a short timeout and cancel the monitoring worker so the
-        app exits snappily even if websocket close or the phase loops are
-        still unwinding.
+        Cap cleanup at a short timeout, cancel the monitoring worker, and
+        ask the monitoring service not to wait on the child — otherwise
+        asyncio's interpreter-teardown step would block on the executor
+        thread still inside ``subprocess.wait(timeout=10)``.
         """
         if self._monitoring_worker is not None:
             self._monitoring_worker.cancel()
 
         try:
-            await asyncio.wait_for(self.monitoring_service.stop_monitoring(), timeout=1.5)
+            await asyncio.wait_for(
+                self.monitoring_service.stop_monitoring(wait_for_process=False),
+                timeout=1.5,
+            )
         except (asyncio.TimeoutError, Exception):
             pass  # Best effort — OS will reap anything left
         self.exit()

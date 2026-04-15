@@ -195,11 +195,16 @@ class MonitoringService:
             await self.websocket_manager.unsubscribe_from_streams(["ledger"])
             await self.state_manager.update_process_info(None, None)
 
-    async def stop_monitoring(self):
-        """Stop monitoring"""
+    async def stop_monitoring(self, wait_for_process: bool = True):
+        """Stop monitoring.
+
+        Pass ``wait_for_process=False`` from the quit path so the child
+        gets SIGTERM and we return immediately — avoids a cleanup hang
+        while python waits for the executor thread doing ``process.wait``.
+        """
         self.logger.info("Stopping monitoring...")
         self._shutdown_event.set()
-        await self.process_manager.stop_current()
+        await self.process_manager.stop_current(wait=wait_for_process)
         await self.websocket_manager.disconnect()
 
     async def _tick_timer(self):
@@ -611,9 +616,10 @@ class MonitoringService:
                 tps_str = f", {transaction_count / secs:.1f} tps"
         self._peak_rss_mb = max(self._peak_rss_mb, rss_mb)
 
-        # Breakdown info (Linux populates all; macOS gives anon via uss)
+        # Breakdown info (Linux populates all; macOS gives anon via uss when
+        # running as root, otherwise anonymous_mb is None and we skip the line)
         anon_str = ""
-        if breakdown.supported:
+        if breakdown.supported and breakdown.anonymous_mb is not None:
             anon_mb = breakdown.anonymous_mb
             mmap_mb = breakdown.nodestore_mb + breakdown.other_file_mb
             self._peak_anon_mb = max(self._peak_anon_mb, anon_mb)
