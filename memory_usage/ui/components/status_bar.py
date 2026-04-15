@@ -2,6 +2,8 @@
 Status bar component for the dashboard
 """
 
+from typing import Optional
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.reactive import reactive
@@ -14,6 +16,20 @@ from ...utils.formatters import (
     format_memory,
 )
 from ...utils.parsers import parse_ledger_ranges
+
+
+def _parse_range_end(complete_ledgers: str) -> Optional[int]:
+    """Return the highest ledger index covered by ``complete_ledgers``.
+
+    ``complete_ledgers`` is rippled's ``server_info`` range string, e.g.
+    ``"103571598-103573581"`` or ``"100-200,300-400"``. We only care about
+    the last range's upper bound.
+    """
+    try:
+        last = complete_ledgers.rsplit(",", 1)[-1].strip()
+        return int(last.split("-")[-1].strip())
+    except (ValueError, IndexError):
+        return None
 
 
 class StatusItem(Static):
@@ -71,38 +87,37 @@ class StatusBar(Static):
 
         # Update ledgers (combined format)
         if state.complete_ledgers and state.complete_ledgers != "empty":
-            # Start with the range
             ranges = format_ledger_ranges_display(state.complete_ledgers)
             ledger_count = parse_ledger_ranges(state.complete_ledgers)
+            range_end = _parse_range_end(state.complete_ledgers)
 
-            # Build the string: range @ current (total, tracked)
             ledgers_str = f"{ranges}"
 
-            # Add current ledger with @
             if state.current_ledger != "N/A":
-                current_ledger_num = None
+                current_ledger_num: Optional[int] = None
                 try:
                     current_ledger_num = int(state.current_ledger)
-                    ledgers_str += f" @ {current_ledger_num:,}"
                 except ValueError:
+                    current_ledger_num = None
+
+                # Only show ' @ X' when the current ledger is AHEAD of the
+                # tracked range end — otherwise it's redundant with the
+                # 'A-B' range already shown.
+                if current_ledger_num is not None:
+                    if range_end is None or current_ledger_num > range_end:
+                        ledgers_str += f" @ {current_ledger_num:,}"
+                else:
                     ledgers_str += f" @ {state.current_ledger}"
 
-                # Calculate ledgers since sync
                 ledgers_since_sync = 0
                 if state.sync_start_ledger is not None and current_ledger_num is not None:
                     ledgers_since_sync = current_ledger_num - state.sync_start_ledger
-                    # Debug logging - always log to see what's happening
-                    print(
-                        f"DEBUG StatusBar: sync_start={state.sync_start_ledger}, current={current_ledger_num}, diff={ledgers_since_sync}"
-                    )
 
-                # Add counts in parentheses
                 ledgers_str += f" ({ledger_count:,} total"
                 if ledgers_since_sync > 0:
                     ledgers_str += f", {ledgers_since_sync:,} tracked"
                 ledgers_str += ")"
             else:
-                # No current ledger, just show total
                 ledgers_str += f" ({ledger_count:,} total)"
 
             self.ledgers_text = ledgers_str
