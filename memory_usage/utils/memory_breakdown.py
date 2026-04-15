@@ -31,7 +31,19 @@ import psutil
 #   7f1234567000-7f1234abc000 r-xp 00000000 08:01 12345     /path/to/libsome.so
 _HEADER_RE = re.compile(r"^[0-9a-f]+-[0-9a-f]+ [rwxps-]{4} ")
 
-_NODESTORE_SUFFIXES = (".nudb", ".db", ".sst", ".ldb", ".sqlite", ".sqlite-wal")
+_NODESTORE_SUFFIXES = (
+    ".nudb",  # NuDB
+    ".db",  # SQLite (transactions.db, wallet.db)
+    ".sst",  # RocksDB
+    ".ldb",  # LevelDB
+    ".sqlite",
+    ".sqlite-wal",
+    ".pack",  # leaf-pack / similar mmap'd derived datasets
+)
+# Path segments that strongly imply a rippled database file even without a
+# matching extension — catches NuDB .dat/.key/.log lurking in db directories
+# without false-matching on /var/log/foo.log etc.
+_NODESTORE_PATH_MARKERS = ("/db/", "/nudb/", "/rocksdb/")
 _SHARED_LIB_MARKERS = (".so", ".dylib")
 
 
@@ -83,10 +95,13 @@ def _categorize(path: str) -> str:
     if not path or path.startswith("["):
         return "anon"
     lowered = path.lower()
-    if lowered.endswith(_NODESTORE_SUFFIXES):
-        return "nodestore"
+    # Shared libs first — would otherwise false-match /db/ paths on some distros
     if any(marker in lowered for marker in _SHARED_LIB_MARKERS):
         return "shared_lib"
+    if lowered.endswith(_NODESTORE_SUFFIXES):
+        return "nodestore"
+    if any(marker in lowered for marker in _NODESTORE_PATH_MARKERS):
+        return "nodestore"
     return "other_file"
 
 
