@@ -33,7 +33,11 @@ def _format_bytes(n_bytes: int) -> str:
 
 
 def _format_count(n: int) -> str:
-    return f"{n:,}"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return f"{n}"
 
 
 class SHAMapPoolsDisplay(VerticalScroll):
@@ -73,10 +77,9 @@ class SHAMapPoolsDisplay(VerticalScroll):
         pools: Optional[Dict[str, Any]],
         locks: Optional[Dict[str, Any]],
     ) -> Table:
-        table = Table(show_header=True, header_style="bold cyan", box=None, expand=True)
-        table.add_column("Metric", style="yellow", ratio=3)
-        table.add_column("Value", justify="right", style="green", ratio=2)
-        table.add_column("%", justify="right", style="cyan", ratio=1)
+        table = Table(show_header=False, box=None, expand=True, pad_edge=False)
+        table.add_column(style="yellow", ratio=3, no_wrap=True)
+        table.add_column(justify="right", style="green", ratio=2, no_wrap=True)
 
         if pools:
             total = pools.get("_total") or {}
@@ -84,17 +87,21 @@ class SHAMapPoolsDisplay(VerticalScroll):
             peak_b = _to_int(total.get("peak_bytes"))
             wasted_b = _to_int(total.get("cached_wasted_bytes"))
             cum_allocs = _to_int(total.get("cumulative_allocs"))
+            wasted_pct = (wasted_b / peak_b * 100) if peak_b > 0 else 0
 
-            def pct_of_peak(v: int) -> str:
-                return f"{(v / peak_b * 100):.1f}%" if peak_b > 0 else "-"
+            table.add_row("[bold magenta]TaggedPointer pools[/bold magenta]", "")
+            table.add_row(
+                "  Current / Peak",
+                f"{_format_bytes(current_b)} / {_format_bytes(peak_b)}",
+            )
+            table.add_row(
+                "  Cached (peak-cur)",
+                f"{_format_bytes(wasted_b)} ({wasted_pct:.1f}%)",
+            )
+            table.add_row("  Lifetime allocs", _format_count(cum_allocs))
 
-            table.add_row("[bold]TaggedPointer pools[/bold]", "", "", style="bold magenta")
-            table.add_row("  Current", _format_bytes(current_b), pct_of_peak(current_b))
-            table.add_row("  Peak (high-water)", _format_bytes(peak_b), "100%" if peak_b else "-")
-            table.add_row("  Cached / unreturned", _format_bytes(wasted_b), pct_of_peak(wasted_b))
-            table.add_row("  Lifetime allocs", _format_count(cum_allocs), "")
-
-            # Top non-empty slots by current usage, to spot uneven churn.
+            # Top slots by current byte usage. Compact: bytes + chunk counts
+            # on the same line so we don't need a third column.
             slot_rows = []
             for key, entry in pools.items():
                 if not key.endswith("_slot") or not isinstance(entry, dict):
@@ -109,24 +116,27 @@ class SHAMapPoolsDisplay(VerticalScroll):
             slot_rows.sort(key=lambda r: r[1], reverse=True)
 
             if slot_rows:
-                table.add_row("", "", "")
-                table.add_row("[bold]Top slots[/bold]", "cur / peak", "", style="bold magenta")
+                table.add_row("", "")
+                table.add_row("[bold magenta]Top slots[/bold magenta]", "bytes  chunks")
                 for slot, cur_bytes, current, peak in slot_rows[:6]:
+                    chunks = (
+                        f"{_format_count(current)}"
+                        if current == peak
+                        else f"{_format_count(current)}/{_format_count(peak)}"
+                    )
                     table.add_row(
                         f"  slot {slot}",
-                        _format_bytes(cur_bytes),
-                        f"{_format_count(current)} / {_format_count(peak)}",
+                        f"{_format_bytes(cur_bytes)}  [dim]{chunks}[/dim]",
                     )
 
         if locks:
             if pools:
-                table.add_row("", "", "")
+                table.add_row("", "")
             held_ms = _to_int(locks.get("held_ms"))
             acquires = _to_int(locks.get("acquires"))
             mean_ns = _to_int(locks.get("mean_ns"))
-            table.add_row("[bold]TreeNodeCache locks[/bold]", "", "", style="bold magenta")
-            table.add_row("  Total held", f"{held_ms:,} ms", "")
-            table.add_row("  Acquires", _format_count(acquires), "")
-            table.add_row("  Mean hold", f"{mean_ns:,} ns", "")
+            table.add_row("[bold magenta]TreeNodeCache locks[/bold magenta]", "")
+            table.add_row("  Held / Acquires", f"{held_ms:,} ms / {_format_count(acquires)}")
+            table.add_row("  Mean hold", f"{mean_ns:,} ns")
 
         return table
