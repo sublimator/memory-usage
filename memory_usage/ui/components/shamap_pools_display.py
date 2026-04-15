@@ -77,12 +77,12 @@ class SHAMapPoolsDisplay(VerticalScroll):
         pools: Optional[Dict[str, Any]],
         locks: Optional[Dict[str, Any]],
     ) -> Table:
-        # expand=False lets the table hug its content — the previous layout
-        # stretched to panel width and left a wide gap between labels and
-        # values. pad_edge=False drops the 1-char gutters rich adds by default.
+        # Three columns so bytes and chunks line up across all rows. The
+        # aggregate/locks rows leave the third column empty.
         table = Table(show_header=False, box=None, expand=False, pad_edge=False)
         table.add_column(style="yellow", no_wrap=True)
         table.add_column(justify="right", style="green", no_wrap=True)
+        table.add_column(justify="right", style="dim", no_wrap=True)
 
         if pools:
             total = pools.get("_total") or {}
@@ -92,19 +92,19 @@ class SHAMapPoolsDisplay(VerticalScroll):
             cum_allocs = _to_int(total.get("cumulative_allocs"))
             wasted_pct = (wasted_b / peak_b * 100) if peak_b > 0 else 0
 
-            table.add_row("[bold magenta]TaggedPointer pools[/bold magenta]", "")
+            table.add_row("[bold magenta]TaggedPointer pools[/bold magenta]", "", "")
             table.add_row(
                 "  Current / Peak",
                 f"{_format_bytes(current_b)} / {_format_bytes(peak_b)}",
+                "",
             )
             table.add_row(
                 "  Cached (peak-cur)",
                 f"{_format_bytes(wasted_b)} ({wasted_pct:.1f}%)",
+                "",
             )
-            table.add_row("  Lifetime allocs", _format_count(cum_allocs))
+            table.add_row("  Lifetime allocs", _format_count(cum_allocs), "")
 
-            # Top slots by current byte usage. Compact: bytes + chunk counts
-            # on the same line so we don't need a third column.
             slot_rows = []
             for key, entry in pools.items():
                 if not key.endswith("_slot") or not isinstance(entry, dict):
@@ -119,27 +119,29 @@ class SHAMapPoolsDisplay(VerticalScroll):
             slot_rows.sort(key=lambda r: r[1], reverse=True)
 
             if slot_rows:
-                table.add_row("", "")
-                table.add_row("[bold magenta]All slots[/bold magenta]", "bytes  chunks")
+                table.add_row("", "", "")
+                table.add_row("[bold magenta]All slots[/bold magenta]", "bytes", "chunks")
                 for slot, cur_bytes, current, peak in slot_rows:
-                    chunks = (
-                        f"{_format_count(current)}"
-                        if current == peak
-                        else f"{_format_count(current)}/{_format_count(peak)}"
-                    )
-                    table.add_row(
-                        f"  slot {slot}",
-                        f"{_format_bytes(cur_bytes)}  [dim]{chunks}[/dim]",
-                    )
+                    cur_str = _format_count(current)
+                    peak_str = _format_count(peak)
+                    # Drop '/X' when the formatted strings match — pointless
+                    # noise when the only difference is below the displayed
+                    # precision.
+                    chunks = cur_str if cur_str == peak_str else f"{cur_str}/{peak_str}"
+                    table.add_row(f"  slot {slot}", _format_bytes(cur_bytes), chunks)
 
         if locks:
             if pools:
-                table.add_row("", "")
+                table.add_row("", "", "")
             held_ms = _to_int(locks.get("held_ms"))
             acquires = _to_int(locks.get("acquires"))
             mean_ns = _to_int(locks.get("mean_ns"))
-            table.add_row("[bold magenta]TreeNodeCache locks[/bold magenta]", "")
-            table.add_row("  Held / Acquires", f"{held_ms:,} ms / {_format_count(acquires)}")
-            table.add_row("  Mean hold", f"{mean_ns:,} ns")
+            table.add_row("[bold magenta]TreeNodeCache locks[/bold magenta]", "", "")
+            table.add_row(
+                "  Held / Acquires",
+                f"{held_ms:,} ms / {_format_count(acquires)}",
+                "",
+            )
+            table.add_row("  Mean hold", f"{mean_ns:,} ns", "")
 
         return table
