@@ -77,9 +77,12 @@ class SHAMapPoolsDisplay(VerticalScroll):
         pools: Optional[Dict[str, Any]],
         locks: Optional[Dict[str, Any]],
     ) -> Table:
-        table = Table(show_header=False, box=None, expand=True, pad_edge=False)
-        table.add_column(style="yellow", ratio=3, no_wrap=True)
-        table.add_column(justify="right", style="green", ratio=2, no_wrap=True)
+        # expand=False lets the table hug its content — the previous layout
+        # stretched to panel width and left a wide gap between labels and
+        # values. pad_edge=False drops the 1-char gutters rich adds by default.
+        table = Table(show_header=False, box=None, expand=False, pad_edge=False)
+        table.add_column(style="yellow", no_wrap=True)
+        table.add_column(justify="right", style="green", no_wrap=True)
 
         if pools:
             total = pools.get("_total") or {}
@@ -117,8 +120,8 @@ class SHAMapPoolsDisplay(VerticalScroll):
 
             if slot_rows:
                 table.add_row("", "")
-                table.add_row("[bold magenta]Top slots[/bold magenta]", "bytes  chunks")
-                for slot, cur_bytes, current, peak in slot_rows[:6]:
+                table.add_row("[bold magenta]All slots[/bold magenta]", "bytes  chunks")
+                for slot, cur_bytes, current, peak in slot_rows:
                     chunks = (
                         f"{_format_count(current)}"
                         if current == peak
