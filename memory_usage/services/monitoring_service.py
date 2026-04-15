@@ -59,6 +59,13 @@ class MonitoringService:
         self.complete_ledgers = "empty"
         self.ledger_close_count = 0
 
+        # Per-snapshot deltas and peaks (reset on each new binary)
+        self._last_snapshot_rss_mb: Optional[float] = None
+        self._last_snapshot_anon_mb: Optional[float] = None
+        self._last_snapshot_time: Optional[datetime] = None
+        self._peak_rss_mb: float = 0.0
+        self._peak_anon_mb: float = 0.0
+
         # Diagnostic data tracking
         self.latest_counts: Optional[Dict[str, Any]] = None
         self.latest_job_types: Optional[List[Dict[str, Any]]] = None
@@ -522,6 +529,11 @@ class MonitoringService:
         self.latest_counts = None
         self.latest_job_types = None
         self.latest_catalogue_status = None
+        self._last_snapshot_rss_mb = None
+        self._last_snapshot_anon_mb = None
+        self._last_snapshot_time = None
+        self._peak_rss_mb = 0.0
+        self._peak_anon_mb = 0.0
 
         self.logger.info(f"Initialized result tracking for {binary_name}")
 
@@ -583,20 +595,55 @@ class MonitoringService:
         if self._current_result:
             self._current_result.snapshots.append(snapshot)
 
+        # Update peaks and compute deltas from last snapshot (used for log)
+        rss_mb = snapshot.rss_mb
+        now = datetime.now()
+        rss_delta_str = ""
+        since_last_str = ""
+        tps_str = ""
+        if self._last_snapshot_rss_mb is not None:
+            rss_delta = rss_mb - self._last_snapshot_rss_mb
+            rss_delta_str = f" Δ{rss_delta:+.1f}"
+        if self._last_snapshot_time is not None:
+            secs = (now - self._last_snapshot_time).total_seconds()
+            since_last_str = f" +{secs:.1f}s"
+            if transaction_count and secs > 0:
+                tps_str = f", {transaction_count / secs:.1f} tps"
+        self._peak_rss_mb = max(self._peak_rss_mb, rss_mb)
+
+        # Breakdown info (Linux populates all; macOS gives anon via uss)
+        anon_str = ""
+        if breakdown.supported:
+            anon_mb = breakdown.anonymous_mb
+            mmap_mb = breakdown.nodestore_mb + breakdown.other_file_mb
+            self._peak_anon_mb = max(self._peak_anon_mb, anon_mb)
+            anon_delta = ""
+            if self._last_snapshot_anon_mb is not None:
+                d = anon_mb - self._last_snapshot_anon_mb
+                anon_delta = f" Δ{d:+.1f}"
+            anon_str = f" | anon {anon_mb:.0f}MB{anon_delta}, mmap {mmap_mb:.0f}MB"
+            self._last_snapshot_anon_mb = anon_mb
+
         # Log ledger close if this is from a ledger event
         if ledger_index:
-            if ledger_count > 0:
-                self.logger.info(
-                    f"Ledger closed: {ledger_index}, txns: {transaction_count} (total txns: {self.total_txns}, ranges: {format_ledger_ranges(self.complete_ledgers)} - {ledger_count} ledgers)"
-                )
-            else:
-                self.logger.info(
-                    f"Ledger closed: {ledger_index}, txns: {transaction_count} (total txns: {self.total_txns}, ranges: {self.complete_ledgers})"
-                )
-
-            self.logger.info(
-                f"Memory: {snapshot.rss_mb:.1f}MB ({snapshot.memory_percent:.1f}%) - Total elapsed: {format_duration(snapshot.elapsed_seconds)}, Test elapsed: {format_duration(snapshot.monitoring_elapsed_seconds or 0)}"
+            range_info = (
+                f"{format_ledger_ranges(self.complete_ledgers)} ({ledger_count} ledgers)"
+                if ledger_count > 0
+                else self.complete_ledgers
             )
+            self.logger.info(
+                f"Ledger {ledger_index}: {transaction_count} txns{tps_str} "
+                f"(total {self.total_txns},{since_last_str} since prev) | {range_info}"
+            )
+            self.logger.info(
+                f"Memory: {rss_mb:.1f}MB{rss_delta_str} ({snapshot.memory_percent:.1f}%), "
+                f"peak {self._peak_rss_mb:.0f}MB{anon_str} | "
+                f"{snapshot.num_threads}t, test {format_duration(snapshot.monitoring_elapsed_seconds or 0)}"
+            )
+
+        # Record tracking values for next call
+        self._last_snapshot_rss_mb = rss_mb
+        self._last_snapshot_time = now
 
         return snapshot
 
