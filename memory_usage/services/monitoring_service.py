@@ -271,26 +271,13 @@ class MonitoringService:
                     self.state_manager.state.job_types = self.latest_job_types
                     await self.state_manager._notify_observers()
 
-            # Store counts if available
-            if isinstance(counts, dict):
-                self.latest_counts = counts
-                self.state_manager.state.counts = counts
-                await self.state_manager._notify_observers()
-
-            # Store catalogue status if available
-            if isinstance(catalogue_status, dict):
-                self.latest_catalogue_status = catalogue_status
-                self.state_manager.state.catalogue_status = catalogue_status
-                await self.state_manager._notify_observers()
-
                 # Always update ledger info even during polling
-                if complete_ledgers:
-                    ledger_count = parse_ledger_ranges(complete_ledgers)
-                    await self.state_manager.update_ledger_info(
-                        complete_ledgers,
-                        str(server_info.get("validated_ledger", {}).get("seq", "N/A")),
-                        ledger_count,
-                    )
+                ledger_count = parse_ledger_ranges(complete_ledgers)
+                await self.state_manager.update_ledger_info(
+                    complete_ledgers,
+                    str(server_info.get("validated_ledger", {}).get("seq", "N/A")),
+                    ledger_count,
+                )
 
                 # Check if we've received enough ledger closes to consider ourselves synced
                 if self.ledger_close_count >= LEDGER_CLOSES_FOR_SYNC:
@@ -322,7 +309,7 @@ class MonitoringService:
 
                 consecutive_failures = 0  # Reset on successful connection
             else:
-                # No server info - connection might be failing
+                # server_info failed - real connection health signal
                 consecutive_failures += 1
                 if consecutive_failures >= max_consecutive_failures:
                     self.logger.error(
@@ -333,6 +320,18 @@ class MonitoringService:
                     )
                     self._monitoring = False
                     break
+
+            # Store counts if available (optional)
+            if isinstance(counts, dict):
+                self.latest_counts = counts
+                self.state_manager.state.counts = counts
+                await self.state_manager._notify_observers()
+
+            # Store catalogue status if available (Xahau-only — absent on upstream rippled)
+            if isinstance(catalogue_status, dict):
+                self.latest_catalogue_status = catalogue_status
+                self.state_manager.state.catalogue_status = catalogue_status
+                await self.state_manager._notify_observers()
 
             # Calculate elapsed time
             poll_elapsed = (
