@@ -11,6 +11,7 @@ from pathlib import Path
 from .config import Config
 from .container import Container
 from .utils import (
+    debug_dump_process_discovery,
     detect_xahau,
     display_process_menu,
     find_rippled_processes,
@@ -76,6 +77,9 @@ def tail_logs():
 
 def run_attach_mode(args):
     """Run in attach mode - connect to a running process"""
+    if getattr(args, "debug", False):
+        debug_dump_process_discovery()
+
     # Find or select process
     if args.pid:
         # Specific PID provided
@@ -307,6 +311,11 @@ def run():
         type=int,
         default=5,
         help="Seconds between websocket connection attempts (default: 5)",
+    )
+    attach_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Dump process discovery internals before attaching (useful on Linux)",
     )
 
     # Parse args

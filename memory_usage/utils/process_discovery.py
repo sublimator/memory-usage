@@ -2,14 +2,46 @@
 Process discovery utilities for finding running xahaud/rippled processes
 """
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import psutil
 
 from .parsers import parse_debug_logfile
+
+# Binary name prefixes we recognize (order matters only for docs)
+_RIPPLED_NAME_PREFIXES = ("rippled", "xahaud", "xrpld")
+
+
+def _looks_like_rippled(name: str, cmdline: List[str]) -> bool:
+    """Return True if `name` or the cmdline exe basename looks like a rippled binary.
+
+    Linux truncates /proc/PID/comm to 15 chars, so we also consult cmdline[0]
+    for long binary names (e.g. `rippled-compact-exact`).
+    """
+    lowered = name.lower()
+    # Exclude our own entrypoint and anything similar
+    if "monitor" in lowered:
+        return False
+
+    candidates = [lowered]
+    if cmdline:
+        candidates.append(os.path.basename(cmdline[0]).lower())
+
+    return any(c.startswith(_RIPPLED_NAME_PREFIXES) for c in candidates)
+
+
+def _extract_config_path(cmdline: List[str]) -> Optional[str]:
+    """Parse `--conf PATH`, `-c PATH`, `--conf=PATH`, `-c=PATH` from a cmdline."""
+    for i, arg in enumerate(cmdline):
+        if arg in ("--conf", "-c") and i + 1 < len(cmdline):
+            return cmdline[i + 1]
+        if arg.startswith("--conf=") or arg.startswith("-c="):
+            return arg.split("=", 1)[1]
+    return None
 
 
 @dataclass
@@ -84,28 +116,24 @@ def get_process_cwd(pid: int) -> Optional[str]:
 
 
 def find_rippled_processes() -> list[DiscoveredProcess]:
-    """Find all running xahaud/rippled processes"""
+    """Find all running xahaud/rippled/xrpld processes (excluding ourselves)."""
     processes = []
+    own_pid = os.getpid()
 
     for proc in psutil.process_iter(["pid", "name", "cmdline", "memory_info", "exe"]):
         try:
-            name = proc.info["name"] or ""
-            if not ("rippled" in name.lower() or "xahaud" in name.lower()):
+            pid = proc.info["pid"]
+            if pid == own_pid:
                 continue
 
-            pid = proc.info["pid"]
+            name = proc.info["name"] or ""
             cmdline = proc.info["cmdline"] or []
+            if not _looks_like_rippled(name, cmdline):
+                continue
+
             mem_info = proc.info["memory_info"]
             exe = proc.info["exe"] or (cmdline[0] if cmdline else "unknown")
-
-            # Extract config path from cmdline
-            config_path = None
-            for i, arg in enumerate(cmdline):
-                if arg in ("--conf", "-c") and i + 1 < len(cmdline):
-                    config_path = cmdline[i + 1]
-                    break
-
-            # Get working directory
+            config_path = _extract_config_path(cmdline)
             working_dir = get_process_cwd(pid)
 
             processes.append(
@@ -136,13 +164,7 @@ def get_process_by_pid(pid: int) -> Optional[DiscoveredProcess]:
         cmdline = info["cmdline"] or []
         mem_info = info["memory_info"]
         exe = info["exe"] or (cmdline[0] if cmdline else "unknown")
-
-        # Extract config path from cmdline
-        config_path = None
-        for i, arg in enumerate(cmdline):
-            if arg in ("--conf", "-c") and i + 1 < len(cmdline):
-                config_path = cmdline[i + 1]
-                break
+        config_path = _extract_config_path(cmdline)
 
         # Get working directory
         working_dir = get_process_cwd(pid)
@@ -159,6 +181,65 @@ def get_process_by_pid(pid: int) -> Optional[DiscoveredProcess]:
 
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return None
+
+
+def debug_dump_process_discovery() -> None:
+    """Print every process psutil can see, annotated with whether we'd match it.
+
+    Useful on Linux when the attach menu comes up empty even though a rippled
+    is clearly running — helps spot permission issues, truncated comms, or
+    unexpected binary names.
+    """
+    own_pid = os.getpid()
+    matched = 0
+    denied = 0
+    total = 0
+
+    print("-" * 80)
+    print(f"Process discovery debug (own PID: {own_pid})")
+    print(f"  Match prefixes: {_RIPPLED_NAME_PREFIXES}")
+    print("  Exclusion: name contains 'monitor'")
+    print("-" * 80)
+
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "exe"]):
+        total += 1
+        try:
+            pid = proc.info["pid"]
+            name = proc.info["name"] or ""
+            cmdline = proc.info["cmdline"] or []
+            exe = proc.info["exe"] or ""
+
+            # Only bother printing things that look remotely relevant
+            lowered = name.lower()
+            exe_base = os.path.basename(exe or (cmdline[0] if cmdline else "")).lower()
+            if not any(
+                tok in (lowered + " " + exe_base)
+                for tok in ("rippled", "xahaud", "xrpld", "monitor")
+            ):
+                continue
+
+            tag = "MATCH " if _looks_like_rippled(name, cmdline) and pid != own_pid else "skip  "
+            if pid == own_pid:
+                tag = "self  "
+            if tag.startswith("MATCH"):
+                matched += 1
+
+            print(f"  [{tag}] pid={pid} name={name!r} exe={exe_base!r}")
+            if cmdline:
+                joined = " ".join(cmdline)
+                if len(joined) > 100:
+                    joined = joined[:97] + "..."
+                print(f"             cmdline: {joined}")
+
+        except psutil.AccessDenied:
+            denied += 1
+            print(f"  [denied] pid={proc.pid} (AccessDenied — try with sudo?)")
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+
+    print("-" * 80)
+    print(f"Scanned {total} processes, matched {matched}, access-denied {denied}")
+    print("-" * 80)
 
 
 def display_process_menu(processes: list[DiscoveredProcess]) -> Optional[DiscoveredProcess]:

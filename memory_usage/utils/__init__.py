@@ -6,6 +6,7 @@ from .formatters import format_binary_name, format_duration, format_ledger_range
 from .parsers import detect_xahau, parse_ledger_ranges, parse_rippled_config
 from .process_discovery import (
     DiscoveredProcess,
+    debug_dump_process_discovery,
     display_process_menu,
     find_rippled_processes,
     get_process_by_pid,
@@ -26,4 +27,5 @@ __all__ = [
     "find_rippled_processes",
     "get_process_by_pid",
     "display_process_menu",
+    "debug_dump_process_discovery",
 ]
