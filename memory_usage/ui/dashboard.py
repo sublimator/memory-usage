@@ -25,6 +25,7 @@ from .components import (
     CatalogueStatusDisplay,
     CountsDisplay,
     JobsDisplay,
+    MemoryBreakdownDisplay,
     MemoryGraph,
     MonitorLogViewer,
     ProcessOutputViewer,
@@ -42,6 +43,7 @@ class MemoryMonitorDashboard(App):
     counts_display: CountsDisplay
     jobs_display: JobsDisplay
     catalogue_display: CatalogueStatusDisplay
+    memory_breakdown_display: MemoryBreakdownDisplay
     memory_graph: MemoryGraph
 
     CSS = """
@@ -137,6 +139,13 @@ class MemoryMonitorDashboard(App):
     CatalogueStatusDisplay {
         height: 1fr;
         border: solid $secondary;
+        padding: 1;
+        background: $surface;
+    }
+
+    MemoryBreakdownDisplay {
+        height: 2fr;
+        border: solid $success;
         padding: 1;
         background: $surface;
     }
@@ -302,6 +311,9 @@ class MemoryMonitorDashboard(App):
                 self.catalogue_display = CatalogueStatusDisplay()
                 yield self.catalogue_display
 
+                self.memory_breakdown_display = MemoryBreakdownDisplay()
+                yield self.memory_breakdown_display
+
         # Memory graph at the bottom
         self.memory_graph = MemoryGraph()
         yield self.memory_graph
@@ -373,6 +385,8 @@ class MemoryMonitorDashboard(App):
                 self.counts_display.update_counts(state.counts)
             if state.catalogue_status and self.catalogue_display:
                 self.catalogue_display.update_catalogue_status(state.catalogue_status)
+            if state.memory_breakdown and self.memory_breakdown_display:
+                self.memory_breakdown_display.update_breakdown(state.memory_breakdown)
 
             # Detect new process start
             if state.current_pid and state.current_pid != self._last_pid:

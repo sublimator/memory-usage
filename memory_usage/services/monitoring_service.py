@@ -545,6 +545,12 @@ class MonitoringService:
         # Get memory stats
         memory_stats = self.process_manager.get_memory_stats()
 
+        # Get per-VMA breakdown (Linux-only; returns supported=False elsewhere)
+        breakdown = self.process_manager.get_memory_breakdown()
+        breakdown_dict = breakdown.to_dict() if breakdown.supported else None
+        if breakdown_dict is not None:
+            self.state_manager.state.memory_breakdown = breakdown_dict
+
         # Update transaction count
         if transaction_count:
             self.total_txns += transaction_count
@@ -570,6 +576,7 @@ class MonitoringService:
             # Include diagnostic data if available
             counts=self.latest_counts,
             job_types=self.latest_job_types,
+            memory_breakdown=breakdown_dict,
         )
 
         # Add to current result

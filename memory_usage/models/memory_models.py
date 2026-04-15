@@ -29,6 +29,8 @@ class MemorySnapshot(BaseModel):
     # Diagnostic data captured at snapshot time
     counts: Optional[Dict[str, Any]] = None  # get_counts response
     job_types: Optional[List[Dict[str, Any]]] = None  # server_info job_types
+    # Per-VMA RSS breakdown (Linux only; None elsewhere)
+    memory_breakdown: Optional[Dict[str, Any]] = None
 
 
 class SystemInfo(BaseModel):

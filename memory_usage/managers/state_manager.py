@@ -46,6 +46,8 @@ class ApplicationState:
     job_types: Optional[List[Dict[str, Any]]] = None
     counts: Optional[Dict[str, Any]] = None
     catalogue_status: Optional[Dict[str, Any]] = None
+    # Per-VMA RSS breakdown (Linux only)
+    memory_breakdown: Optional[Dict[str, Any]] = None
 
 
 class StateManager:

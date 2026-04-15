@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Callable, List, Optional, Union
 from ..config import Config
 from ..services.attached_process_service import AttachedProcessService
 from ..services.process_service import ProcessService
+from ..utils.memory_breakdown import MemoryBreakdown, get_memory_breakdown
 
 if TYPE_CHECKING:
     from ..services.logging_service import LoggingService
@@ -136,6 +137,12 @@ class ProcessManager:
         if self.current_process:
             return self.current_process.get_memory_usage()
         return {}
+
+    def get_memory_breakdown(self, top_n: int = 5) -> MemoryBreakdown:
+        """Get a per-VMA RSS breakdown for the current process (Linux only)."""
+        if self.current_process and self.current_process.pid:
+            return get_memory_breakdown(self.current_process.pid, top_n=top_n)
+        return MemoryBreakdown(supported=False)
 
     def get_log_file_path(self) -> Optional[str]:
         """Get the log file path for the current process"""
