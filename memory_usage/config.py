@@ -21,6 +21,10 @@ class Config(BaseSettings):
     test_duration_minutes: int = Field(default=5)
     poll_interval: int = Field(default=4)
 
+    # Websocket retry tuning (0 max_retries = retry forever)
+    websocket_max_retries: int = Field(default=5)
+    websocket_retry_delay_seconds: int = Field(default=5)
+
     # Binary selection
     specified_binaries: Optional[List[str]] = Field(default=None)
 

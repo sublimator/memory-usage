@@ -143,6 +143,8 @@ def run_attach_mode(args):
         build_dir="",
         output_dir=args.output_dir,
         poll_interval=1,
+        websocket_max_retries=args.ws_max_retries,
+        websocket_retry_delay_seconds=args.ws_retry_delay,
         # Attach mode specific
         attach_mode=True,
         attach_pid=proc.pid,
@@ -240,6 +242,18 @@ def run():
         default="memory_monitor_results",
         help="Directory for output files (default: memory_monitor_results)",
     )
+    monitor_parser.add_argument(
+        "--ws-max-retries",
+        type=int,
+        default=5,
+        help="Max websocket connection attempts before giving up (0 = retry forever, default: 5)",
+    )
+    monitor_parser.add_argument(
+        "--ws-retry-delay",
+        type=int,
+        default=5,
+        help="Seconds between websocket connection attempts (default: 5)",
+    )
 
     # Logs command
     subparsers.add_parser("logs", help="Tail the latest process output log file")
@@ -281,6 +295,18 @@ def run():
         type=str,
         default="memory_monitor_results",
         help="Directory for output files (default: memory_monitor_results)",
+    )
+    attach_parser.add_argument(
+        "--ws-max-retries",
+        type=int,
+        default=5,
+        help="Max websocket connection attempts before giving up (0 = retry forever, default: 5)",
+    )
+    attach_parser.add_argument(
+        "--ws-retry-delay",
+        type=int,
+        default=5,
+        help="Seconds between websocket connection attempts (default: 5)",
     )
 
     # Parse args
@@ -337,6 +363,8 @@ def run():
         build_dir=args.build_dir,
         output_dir=args.output_dir,
         poll_interval=1,  # Default poll interval
+        websocket_max_retries=args.ws_max_retries,
+        websocket_retry_delay_seconds=args.ws_retry_delay,
     )
 
     # Configure DI container

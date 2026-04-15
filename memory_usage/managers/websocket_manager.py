@@ -23,19 +23,23 @@ class WebSocketManager:
         self._lock = asyncio.Lock()
         self._subscribed_streams: Set[str] = set()
         self._message_handlers: List[Callable] = []
-        self._connection_retries = 0
-        self._max_retries = 5
 
     async def connect(self) -> AsyncWebsocketClient:
-        """Get or create WebSocket connection with retry logic"""
+        """Get or create WebSocket connection with retry logic.
+
+        Honors ``config.websocket_max_retries`` (``0`` means retry forever) and
+        ``config.websocket_retry_delay_seconds`` between attempts.
+        """
         async with self._lock:
             if self.client and self.client.is_open():
                 return self.client
 
-            # Reset retries on new connection attempt
-            self._connection_retries = 0
+            max_retries = self.config.websocket_max_retries
+            retry_delay = self.config.websocket_retry_delay_seconds
+            attempt = 0
 
-            while self._connection_retries < self._max_retries:
+            while max_retries == 0 or attempt < max_retries:
+                attempt += 1
                 try:
                     logger.info(f"Attempting WebSocket connection to {self.config.websocket_url}")
                     self.client = AsyncWebsocketClient(self.config.websocket_url)
@@ -52,15 +56,13 @@ class WebSocketManager:
                     return self.client
 
                 except Exception as e:
-                    self._connection_retries += 1
-                    logger.warning(
-                        f"WebSocket connection attempt {self._connection_retries} failed: {e}"
-                    )
+                    suffix = "" if max_retries == 0 else f"/{max_retries}"
+                    logger.warning(f"WebSocket connection attempt {attempt}{suffix} failed: {e}")
 
-                    if self._connection_retries < self._max_retries:
-                        await asyncio.sleep(5)  # Wait before retry
+                    if max_retries == 0 or attempt < max_retries:
+                        await asyncio.sleep(retry_delay)
 
-            raise ConnectionError(f"Failed to connect after {self._max_retries} attempts")
+            raise ConnectionError(f"Failed to connect after {max_retries} attempts")
 
     async def disconnect(self):
         """Close WebSocket connection"""
