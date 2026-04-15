@@ -28,7 +28,7 @@ Quality gates (dev extras: `uv sync --extra dev`):
 
 ```bash
 ruff check memory_usage/
-black memory_usage/
+ruff format memory_usage/
 mypy memory_usage/
 pytest                                      # no tests exist yet
 ```

@@ -20,11 +20,9 @@ dependencies = [
 dev = [
     "pytest>=8.4.1",
     "pytest-asyncio>=1.1.0",
-    "black>=25.1.0",
     "mypy>=1.17.0",
     "ruff>=0.12.4",
     "import-linter>=2.3",
-    "isort>=6.0.1",
 ]
 
 [project.scripts]
@@ -37,16 +35,26 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["memory_usage"]
 
-[tool.black]
-line-length = 100
-target-version = ['py38']
-
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Pydantic @field_validator methods use `cls`, not `self`
+"memory_usage/config.py" = ["N805"]
+
+[tool.ruff.format]
+quote-style = "double"
 
 [tool.mypy]
 python_version = "3.13"
 warn_return_any = true
 warn_unused_configs = true
+
+[dependency-groups]
+dev = [
+    "types-psutil>=7.2.2.20260408",
+]
