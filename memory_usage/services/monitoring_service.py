@@ -217,23 +217,44 @@ class MonitoringService:
     async def _refresh_breakdown_periodically(self):
         """Refresh the memory breakdown cache off the event loop.
 
-        smaps parsing (Linux) and vmmap (macOS) can take hundreds of ms to
-        seconds on a large rippled — running them on every snapshot hung
-        the UI. Do it on its own cadence, in a thread, and push the result
-        to state/latest_breakdown for consumers.
+        smaps parsing (Linux) and vmmap (macOS) can take hundreds of ms — and
+        on macOS vmmap briefly suspends the target via task_for_pid, which
+        measurably slows network sync. Policy:
+
+        - During the polling (sync) phase, skip vmmap entirely and run fast
+          psutil-only aggregates every second so the dashboard fills in
+          promptly while the process is warming up.
+        - Once the monitoring phase begins, honor the configured interval
+          (default 15s) and allow vmmap (if --vmmap not disabled) for
+          per-file detail.
+        - If a refresh returns supported=False (e.g. process not spawned yet,
+          or pid gone), retry after 1s rather than waiting a full interval.
         """
         interval = max(1, self.config.breakdown_interval_seconds)
         try:
             while not self._shutdown_event.is_set():
+                # task_for_pid stall hurts rippled during peer catchup.
+                allow_vmmap = self._monitoring_start_time is not None
                 try:
-                    breakdown = await asyncio.to_thread(self.process_manager.get_memory_breakdown)
+                    breakdown = await asyncio.to_thread(
+                        self.process_manager.get_memory_breakdown,
+                        5,
+                        allow_vmmap,
+                    )
                     self.latest_breakdown = breakdown
                     if breakdown.supported:
                         self.state_manager.state.memory_breakdown = breakdown.to_dict()
                         await self.state_manager._notify_observers()
                 except Exception as e:
                     self.logger.debug(f"breakdown refresh failed: {e}")
-                await asyncio.sleep(interval)
+                    breakdown = None
+
+                # Fast tick while we don't have usable data or are still
+                # syncing; full interval once we're in steady-state monitoring.
+                if breakdown is None or not breakdown.supported or not allow_vmmap:
+                    await asyncio.sleep(1)
+                else:
+                    await asyncio.sleep(interval)
         except asyncio.CancelledError:
             pass
 

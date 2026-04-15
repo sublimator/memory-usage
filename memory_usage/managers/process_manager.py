@@ -144,13 +144,19 @@ class ProcessManager:
             return self.current_process.get_memory_usage()
         return {}
 
-    def get_memory_breakdown(self, top_n: int = 5) -> MemoryBreakdown:
-        """Get a per-VMA RSS breakdown for the current process."""
+    def get_memory_breakdown(self, top_n: int = 5, allow_vmmap: bool = True) -> MemoryBreakdown:
+        """Get a per-VMA RSS breakdown for the current process.
+
+        ``allow_vmmap=False`` forces vmmap off even when the config enables
+        it — used during the sync phase where task_for_pid suspending rippled
+        measurably slows sync. config.use_vmmap is still respected as the
+        master switch.
+        """
         if self.current_process and self.current_process.pid:
             return get_memory_breakdown(
                 self.current_process.pid,
                 top_n=top_n,
-                use_vmmap=self.config.use_vmmap,
+                use_vmmap=self.config.use_vmmap and allow_vmmap,
             )
         return MemoryBreakdown(supported=False)
 
