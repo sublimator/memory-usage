@@ -137,6 +137,7 @@ class MonitoringService:
         # Initialize result tracking
         self._initialize_binary_result(binary_path, name)
         self._test_start_time = datetime.now()
+        tick_task = asyncio.create_task(self._tick_timer())
 
         try:
             # Attach to the process
@@ -178,6 +179,7 @@ class MonitoringService:
             self._finalize_binary_result("error", str(e))
 
         finally:
+            tick_task.cancel()
             # Save results
             self._save_binary_result()
 
@@ -193,11 +195,32 @@ class MonitoringService:
         await self.process_manager.stop_current()
         await self.websocket_manager.disconnect()
 
+    async def _tick_timer(self):
+        """Push elapsed/test timing to state every second.
+
+        Runs from process start through finalization so the dashboard's Total
+        clock advances even while we're still trying to connect, before the
+        polling loop kicks in.
+        """
+        try:
+            while not self._shutdown_event.is_set() and self._test_start_time:
+                elapsed = (datetime.now() - self._test_start_time).total_seconds()
+                monitoring_elapsed = None
+                if self._monitoring_start_time:
+                    monitoring_elapsed = (
+                        datetime.now() - self._monitoring_start_time
+                    ).total_seconds()
+                await self.state_manager.update_timing(elapsed, monitoring_elapsed)
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+
     async def _test_binary(self, binary_path: str, binary_name: str):
         """Test a single binary"""
         # Initialize result tracking
         self._initialize_binary_result(binary_path, binary_name)
         self._test_start_time = datetime.now()
+        tick_task = asyncio.create_task(self._tick_timer())
 
         try:
             # Start the process
@@ -225,6 +248,7 @@ class MonitoringService:
             self._finalize_binary_result("error", str(e))
 
         finally:
+            tick_task.cancel()
             # Save results
             self._save_binary_result()
 
