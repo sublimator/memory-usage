@@ -109,14 +109,19 @@ class ProcessManager:
                 raise RuntimeError(f"Failed to attach to process {name} (PID: {pid})")
 
     async def stop_current(self):
-        """Stop the current process (or detach if in attach mode)"""
+        """Stop the current process (or detach if in attach mode).
+
+        ProcessService.stop() blocks on subprocess.wait(timeout=10) and a
+        thread join — run it in an executor so the event loop keeps turning
+        and any outer asyncio.wait_for timeout can actually fire.
+        """
         async with self._lock:
             if self.current_process:
                 if self._attach_mode:
                     logger.info(f"Detaching from process {self.current_process.name}")
                 else:
                     logger.info(f"Stopping process {self.current_process.name}")
-                self.current_process.stop()
+                await asyncio.to_thread(self.current_process.stop)
                 self.current_process = None
                 self._attach_mode = False
 
