@@ -29,6 +29,7 @@ from .components import (
     MemoryGraph,
     MonitorLogViewer,
     ProcessOutputViewer,
+    SHAMapPoolsDisplay,
     StatusBar,
 )
 
@@ -44,6 +45,7 @@ class MemoryMonitorDashboard(App):
     jobs_display: JobsDisplay
     catalogue_display: CatalogueStatusDisplay
     memory_breakdown_display: MemoryBreakdownDisplay
+    shamap_pools_display: SHAMapPoolsDisplay
     memory_graph: MemoryGraph
 
     CSS = """
@@ -146,6 +148,13 @@ class MemoryMonitorDashboard(App):
     MemoryBreakdownDisplay {
         height: 2fr;
         border: solid $success;
+        padding: 1;
+        background: $surface;
+    }
+
+    SHAMapPoolsDisplay {
+        height: 2fr;
+        border: solid $accent;
         padding: 1;
         background: $surface;
     }
@@ -314,6 +323,9 @@ class MemoryMonitorDashboard(App):
                 self.memory_breakdown_display = MemoryBreakdownDisplay()
                 yield self.memory_breakdown_display
 
+                self.shamap_pools_display = SHAMapPoolsDisplay()
+                yield self.shamap_pools_display
+
         # Memory graph at the bottom
         self.memory_graph = MemoryGraph()
         yield self.memory_graph
@@ -383,6 +395,8 @@ class MemoryMonitorDashboard(App):
                 self.jobs_display.update_jobs(state.job_types)
             if state.counts and self.counts_display:
                 self.counts_display.update_counts(state.counts)
+                # tagged_pointer_pools / treenode_cache_locks ride on counts
+                self.shamap_pools_display.update_counts(state.counts)
             if state.catalogue_status and self.catalogue_display:
                 self.catalogue_display.update_catalogue_status(state.catalogue_status)
             if state.memory_breakdown and self.memory_breakdown_display:

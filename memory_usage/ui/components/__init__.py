@@ -8,6 +8,7 @@ from .jobs_display import JobsDisplay
 from .log_viewer import MonitorLogViewer, ProcessOutputViewer
 from .memory_breakdown_display import MemoryBreakdownDisplay
 from .memory_graph import MemoryGraph
+from .shamap_pools_display import SHAMapPoolsDisplay
 from .status_bar import StatusBar, StatusItem
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "MemoryGraph",
     "CatalogueStatusDisplay",
     "MemoryBreakdownDisplay",
+    "SHAMapPoolsDisplay",
 ]
