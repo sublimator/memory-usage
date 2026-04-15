@@ -56,9 +56,16 @@ class StatusBar(Static):
         # Update memory
         if state.current_memory_mb > 0:
             memory_text = f"Memory: {format_memory(state.current_memory_mb)} ({state.current_memory_percent:.1f}%)"
+            extras = []
             if state.num_threads > 0:
-                memory_text += f" [{state.num_threads} threads]"
+                extras.append(f"{state.num_threads} threads")
+            if state.current_pid is not None:
+                extras.append(f"PID {state.current_pid}")
+            if extras:
+                memory_text += f" [{', '.join(extras)}]"
             self.memory_text = memory_text
+        elif state.current_pid is not None:
+            self.memory_text = f"Memory: N/A [PID {state.current_pid}]"
         else:
             self.memory_text = "Memory: N/A"
 
