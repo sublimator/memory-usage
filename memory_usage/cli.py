@@ -149,6 +149,8 @@ def run_attach_mode(args):
         poll_interval=1,
         websocket_max_retries=args.ws_max_retries,
         websocket_retry_delay_seconds=args.ws_retry_delay,
+        use_vmmap=not args.no_vmmap,
+        breakdown_interval_seconds=args.breakdown_interval,
         # Attach mode specific
         attach_mode=True,
         attach_pid=proc.pid,
@@ -258,6 +260,17 @@ def run():
         default=5,
         help="Seconds between websocket connection attempts (default: 5)",
     )
+    monitor_parser.add_argument(
+        "--no-vmmap",
+        action="store_true",
+        help="Skip shelling out to vmmap on macOS (faster but loses per-file breakdown)",
+    )
+    monitor_parser.add_argument(
+        "--breakdown-interval",
+        type=int,
+        default=15,
+        help="Seconds between full memory breakdown refreshes (default: 15)",
+    )
 
     # Logs command
     subparsers.add_parser("logs", help="Tail the latest process output log file")
@@ -317,6 +330,17 @@ def run():
         action="store_true",
         help="Dump process discovery internals before attaching (useful on Linux)",
     )
+    attach_parser.add_argument(
+        "--no-vmmap",
+        action="store_true",
+        help="Skip shelling out to vmmap on macOS (faster but loses per-file breakdown)",
+    )
+    attach_parser.add_argument(
+        "--breakdown-interval",
+        type=int,
+        default=15,
+        help="Seconds between full memory breakdown refreshes (default: 15)",
+    )
 
     # Parse args
     args = parser.parse_args()
@@ -374,6 +398,8 @@ def run():
         poll_interval=1,  # Default poll interval
         websocket_max_retries=args.ws_max_retries,
         websocket_retry_delay_seconds=args.ws_retry_delay,
+        use_vmmap=not args.no_vmmap,
+        breakdown_interval_seconds=args.breakdown_interval,
     )
 
     # Configure DI container

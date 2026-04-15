@@ -145,9 +145,13 @@ class ProcessManager:
         return {}
 
     def get_memory_breakdown(self, top_n: int = 5) -> MemoryBreakdown:
-        """Get a per-VMA RSS breakdown for the current process (Linux only)."""
+        """Get a per-VMA RSS breakdown for the current process."""
         if self.current_process and self.current_process.pid:
-            return get_memory_breakdown(self.current_process.pid, top_n=top_n)
+            return get_memory_breakdown(
+                self.current_process.pid,
+                top_n=top_n,
+                use_vmmap=self.config.use_vmmap,
+            )
         return MemoryBreakdown(supported=False)
 
     def get_log_file_path(self) -> Optional[str]:

@@ -263,7 +263,7 @@ def _vmmap_mapped_files(pid: int) -> Optional[Dict[str, float]]:
     return per_path
 
 
-def _macos_breakdown(pid: int, top_n: int = 5) -> MemoryBreakdown:
+def _macos_breakdown(pid: int, top_n: int = 5, use_vmmap: bool = True) -> MemoryBreakdown:
     try:
         proc = psutil.Process(pid)
         mi = proc.memory_info()
@@ -283,7 +283,7 @@ def _macos_breakdown(pid: int, top_n: int = 5) -> MemoryBreakdown:
 
     # vmmap gives us per-file rss when we have privileges. Parse its
     # 'mapped file' lines and bucket them via the shared categorizer.
-    per_path = _vmmap_mapped_files(pid)
+    per_path = _vmmap_mapped_files(pid) if use_vmmap else None
 
     if uss_mb is None and per_path is None:
         # No privileges at all — degrade gracefully.
@@ -327,12 +327,16 @@ def _macos_breakdown(pid: int, top_n: int = 5) -> MemoryBreakdown:
     elif uss_mb is not None:
         # No vmmap; fall back to the coarse split.
         b.other_file_mb = max(0.0, rss_mb - uss_mb)
-        b.note = "vmmap unavailable — file-backed breakdown not shown"
+        b.note = (
+            "vmmap disabled — file-backed breakdown not shown"
+            if not use_vmmap
+            else "vmmap unavailable — file-backed breakdown not shown"
+        )
 
     return b
 
 
-def get_memory_breakdown(pid: int, top_n: int = 5) -> MemoryBreakdown:
+def get_memory_breakdown(pid: int, top_n: int = 5, use_vmmap: bool = True) -> MemoryBreakdown:
     """Return a per-category RSS breakdown for the given process.
 
     Heap-saving optimizations show up as a drop in ``anonymous_mb``; pages
@@ -344,5 +348,5 @@ def get_memory_breakdown(pid: int, top_n: int = 5) -> MemoryBreakdown:
     if system == "Linux":
         return _linux_breakdown(pid, top_n)
     if system == "Darwin":
-        return _macos_breakdown(pid, top_n)
+        return _macos_breakdown(pid, top_n, use_vmmap=use_vmmap)
     return MemoryBreakdown(supported=False)

@@ -25,6 +25,13 @@ class Config(BaseSettings):
     websocket_max_retries: int = Field(default=5)
     websocket_retry_delay_seconds: int = Field(default=5)
 
+    # Memory breakdown tuning. Disable vmmap on macOS to skip the subprocess
+    # call (useful when diagnosing hangs or when the target process holds a
+    # task_for_pid lock). breakdown_interval is how often the full breakdown
+    # (smaps / vmmap) is refreshed — aggregate rss still updates every second.
+    use_vmmap: bool = Field(default=True)
+    breakdown_interval_seconds: int = Field(default=15)
+
     # Binary selection
     specified_binaries: Optional[List[str]] = Field(default=None)
 

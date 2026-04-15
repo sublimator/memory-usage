@@ -14,6 +14,7 @@ import psutil
 
 from ..models.memory_models import BinaryTestResult, MemorySnapshot, SystemInfo, TestConfiguration
 from ..utils.formatters import format_duration, format_ledger_ranges
+from ..utils.memory_breakdown import MemoryBreakdown
 from ..utils.parsers import parse_ledger_ranges
 
 # Type hints only - these are injected via DI
@@ -70,6 +71,10 @@ class MonitoringService:
         self.latest_counts: Optional[Dict[str, Any]] = None
         self.latest_job_types: Optional[List[Dict[str, Any]]] = None
         self.latest_catalogue_status: Optional[Dict[str, Any]] = None
+        # Memory breakdown (refreshed on its own cadence so the potentially
+        # expensive smaps/vmmap parse doesn't block the event loop every
+        # ledger close). None until the first refresh task tick completes.
+        self.latest_breakdown: Optional[MemoryBreakdown] = None
 
         # Create output directory
         Path(self.config.output_dir).mkdir(exist_ok=True)
@@ -145,6 +150,7 @@ class MonitoringService:
         self._initialize_binary_result(binary_path, name)
         self._test_start_time = datetime.now()
         tick_task = asyncio.create_task(self._tick_timer())
+        breakdown_task = asyncio.create_task(self._refresh_breakdown_periodically())
 
         try:
             # Attach to the process
@@ -187,6 +193,7 @@ class MonitoringService:
 
         finally:
             tick_task.cancel()
+            breakdown_task.cancel()
             # Save results
             self._save_binary_result()
 
@@ -206,6 +213,29 @@ class MonitoringService:
         self._shutdown_event.set()
         await self.process_manager.stop_current(wait=wait_for_process)
         await self.websocket_manager.disconnect()
+
+    async def _refresh_breakdown_periodically(self):
+        """Refresh the memory breakdown cache off the event loop.
+
+        smaps parsing (Linux) and vmmap (macOS) can take hundreds of ms to
+        seconds on a large rippled — running them on every snapshot hung
+        the UI. Do it on its own cadence, in a thread, and push the result
+        to state/latest_breakdown for consumers.
+        """
+        interval = max(1, self.config.breakdown_interval_seconds)
+        try:
+            while not self._shutdown_event.is_set():
+                try:
+                    breakdown = await asyncio.to_thread(self.process_manager.get_memory_breakdown)
+                    self.latest_breakdown = breakdown
+                    if breakdown.supported:
+                        self.state_manager.state.memory_breakdown = breakdown.to_dict()
+                        await self.state_manager._notify_observers()
+                except Exception as e:
+                    self.logger.debug(f"breakdown refresh failed: {e}")
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            pass
 
     async def _tick_timer(self):
         """Push elapsed/test timing to state every second.
@@ -233,6 +263,7 @@ class MonitoringService:
         self._initialize_binary_result(binary_path, binary_name)
         self._test_start_time = datetime.now()
         tick_task = asyncio.create_task(self._tick_timer())
+        breakdown_task = asyncio.create_task(self._refresh_breakdown_periodically())
 
         try:
             # Start the process
@@ -261,6 +292,7 @@ class MonitoringService:
 
         finally:
             tick_task.cancel()
+            breakdown_task.cancel()
             # Save results
             self._save_binary_result()
 
@@ -539,6 +571,7 @@ class MonitoringService:
         self._last_snapshot_time = None
         self._peak_rss_mb = 0.0
         self._peak_anon_mb = 0.0
+        self.latest_breakdown = None
 
         self.logger.info(f"Initialized result tracking for {binary_name}")
 
@@ -562,11 +595,13 @@ class MonitoringService:
         # Get memory stats
         memory_stats = self.process_manager.get_memory_stats()
 
-        # Get per-VMA breakdown (Linux-only; returns supported=False elsewhere)
-        breakdown = self.process_manager.get_memory_breakdown()
-        breakdown_dict = breakdown.to_dict() if breakdown.supported else None
-        if breakdown_dict is not None:
-            self.state_manager.state.memory_breakdown = breakdown_dict
+        # Read the latest breakdown from the periodic refresh task (see
+        # _refresh_breakdown_periodically). Calling get_memory_breakdown inline
+        # would block the event loop on smaps/vmmap parsing every snapshot.
+        breakdown = self.latest_breakdown
+        breakdown_dict = (
+            breakdown.to_dict() if breakdown is not None and breakdown.supported else None
+        )
 
         # Update transaction count
         if transaction_count:
@@ -619,7 +654,7 @@ class MonitoringService:
         # Breakdown info (Linux populates all; macOS gives anon via uss when
         # running as root, otherwise anonymous_mb is None and we skip the line)
         anon_str = ""
-        if breakdown.supported and breakdown.anonymous_mb is not None:
+        if breakdown is not None and breakdown.supported and breakdown.anonymous_mb is not None:
             anon_mb = breakdown.anonymous_mb
             mmap_mb = breakdown.nodestore_mb + breakdown.other_file_mb
             self._peak_anon_mb = max(self._peak_anon_mb, anon_mb)
