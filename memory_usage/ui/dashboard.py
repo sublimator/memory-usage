@@ -11,6 +11,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header
+from textual.worker import Worker
 
 if TYPE_CHECKING:
     from ..services.logging_service import LoggingService
@@ -267,8 +268,9 @@ class MemoryMonitorDashboard(App):
         self.title = "Xahaud Memory Monitor Dashboard"
         self.sub_title = "Real-time memory monitoring"
 
-        # Background task
+        # Background tasks
         self.monitoring_task: Optional[asyncio.Task] = None
+        self._monitoring_worker: Optional[Worker] = None
 
     def compose(self) -> ComposeResult:
         """Create the layout"""
@@ -324,8 +326,8 @@ class MemoryMonitorDashboard(App):
         self.set_interval(0.1, self._process_queues)
         self.set_interval(1.0, self._update_memory_stats)
 
-        # Start the test
-        self.run_worker(self._start_monitoring, exclusive=True)
+        # Start the test (save worker so we can cancel it on quit)
+        self._monitoring_worker = self.run_worker(self._start_monitoring, exclusive=True)
 
     def _setup_logging(self):
         """Set up logging to capture to the monitor log"""
@@ -496,10 +498,17 @@ class MemoryMonitorDashboard(App):
             await self.state_manager.update_status("Stopped by user")
 
     async def action_quit(self) -> None:
-        """Quit the application with proper cleanup"""
-        # Stop monitoring and cleanup
+        """Quit the application with proper cleanup.
+
+        Cap cleanup at a short timeout and cancel the monitoring worker so the
+        app exits snappily even if websocket close or the phase loops are
+        still unwinding.
+        """
+        if self._monitoring_worker is not None:
+            self._monitoring_worker.cancel()
+
         try:
-            await self.monitoring_service.stop_monitoring()
-        except Exception:
-            pass  # Ignore errors during shutdown
+            await asyncio.wait_for(self.monitoring_service.stop_monitoring(), timeout=1.5)
+        except (asyncio.TimeoutError, Exception):
+            pass  # Best effort — OS will reap anything left
         self.exit()
