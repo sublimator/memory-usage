@@ -70,17 +70,15 @@ class CountsDisplay(VerticalScroll):
             "Objects": [],  # Will be populated dynamically
         }
 
-        # Collect all ripple:: entries dynamically
-        ripple_objects = []
+        # Collect all namespace-qualified class counts (ripple::, xrpl::, etc.)
+        object_entries = []
         for key, value in counts.items():
-            if key.startswith("ripple::"):
-                # Extract the class name after ripple::
-                display_name = key.replace("ripple::", "")
-                ripple_objects.append((key, display_name, ""))
+            if "::" in key:
+                display_name = key.rsplit("::", 1)[-1]
+                object_entries.append((key, display_name, ""))
 
-        # Sort ripple objects by name for consistent display
-        ripple_objects.sort(key=lambda x: x[1])
-        sections["Objects"] = ripple_objects
+        object_entries.sort(key=lambda x: x[1])
+        sections["Objects"] = object_entries
 
         for section, metrics in sections.items():
             # Add section header
