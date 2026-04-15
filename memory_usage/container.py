@@ -16,7 +16,7 @@ class Container(containers.DeclarativeContainer):
     """Main DI container for the application"""
 
     # Configuration - will be overridden with actual Config object
-    config = providers.Object(None)
+    config: providers.Object[Config] = providers.Object(None)  # type: ignore[arg-type]
 
     # Services (Singletons)
     logging_service = providers.Singleton(LoggingService)

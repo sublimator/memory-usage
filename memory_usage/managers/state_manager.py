@@ -3,8 +3,8 @@ Centralized state management for the application
 """
 
 import asyncio
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
 
 
 @dataclass
@@ -51,8 +51,8 @@ class ApplicationState:
 class StateManager:
     """Manages shared application state with observer pattern"""
 
-    def __init__(self):
-        self.state = ApplicationState()
+    def __init__(self) -> None:
+        self.state: ApplicationState = ApplicationState()
         self._lock = asyncio.Lock()
         self._observers: List[Callable] = []
 

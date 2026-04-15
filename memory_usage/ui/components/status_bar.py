@@ -10,7 +10,6 @@ from textual.widgets import Static
 from ...managers.state_manager import ApplicationState
 from ...utils.formatters import (
     format_duration,
-    format_ledger_ranges,
     format_ledger_ranges_display,
     format_memory,
 )

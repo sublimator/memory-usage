@@ -3,14 +3,12 @@ Main monitoring service that orchestrates the memory monitoring process
 """
 
 import asyncio
-import json
-import logging
 import platform
 import socket
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import psutil
 
@@ -57,9 +55,6 @@ class MonitoringService:
 
         # Test tracking
         self.test_run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.test_output_dir = None
-        self.system_info: Optional[SystemInfo] = None
-        self.test_config: Optional[TestConfiguration] = None
         self.total_txns = 0
         self.complete_ledgers = "empty"
         self.ledger_close_count = 0
@@ -71,13 +66,13 @@ class MonitoringService:
 
         # Create output directory
         Path(self.config.output_dir).mkdir(exist_ok=True)
-        self.test_output_dir = Path(self.config.output_dir) / self.test_run_timestamp
+        self.test_output_dir: Path = Path(self.config.output_dir) / self.test_run_timestamp
         self.test_output_dir.mkdir(exist_ok=True)
         self.logger.info(f"Test results will be saved to: {self.test_output_dir}")
 
-        # Initialize system info and test config
-        self._initialize_system_info()
-        self._initialize_test_config()
+        # Initialize system info and test config (must be non-None for BinaryTestResult)
+        self.system_info: SystemInfo = self._build_system_info()
+        self.test_config: TestConfiguration = self._build_test_config()
 
         # Register WebSocket message handler
         self.websocket_manager.add_message_handler(self._handle_websocket_message)
@@ -655,20 +650,20 @@ class MonitoringService:
         except Exception as e:
             self.logger.error(f"Error saving results: {e}")
 
-    def _initialize_system_info(self):
+    def _build_system_info(self) -> SystemInfo:
         """Gather system information"""
-        self.system_info = SystemInfo(
+        return SystemInfo(
             platform=platform.system().lower(),
             platform_version=platform.platform(),
             hostname=socket.gethostname(),
-            cpu_count=psutil.cpu_count(),
+            cpu_count=psutil.cpu_count() or 0,
             total_memory_gb=psutil.virtual_memory().total / (1024**3),
             python_version=sys.version.split()[0],
         )
 
-    def _initialize_test_config(self):
+    def _build_test_config(self) -> TestConfiguration:
         """Initialize test configuration"""
-        self.test_config = TestConfiguration(
+        return TestConfiguration(
             test_duration_minutes=self.config.test_duration_minutes,
             poll_interval_seconds=self.config.poll_interval,
             websocket_url=self.config.websocket_url,

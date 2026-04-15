@@ -4,13 +4,13 @@ Main dashboard application using dependency injection
 
 import asyncio
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from dependency_injector.wiring import Provide, inject
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Footer, Header, Static
+from textual.widgets import Footer, Header
 
 if TYPE_CHECKING:
     from ..services.logging_service import LoggingService
@@ -33,6 +33,15 @@ from .components import (
 
 class MemoryMonitorDashboard(App):
     """Main dashboard application with proper DI"""
+
+    # UI components — assigned in compose(), declared here for type narrowing
+    status_bar: StatusBar
+    monitor_log: MonitorLogViewer
+    process_output: ProcessOutputViewer
+    counts_display: CountsDisplay
+    jobs_display: JobsDisplay
+    catalogue_display: CatalogueStatusDisplay
+    memory_graph: MemoryGraph
 
     CSS = """
     Screen {
@@ -139,20 +148,20 @@ class MemoryMonitorDashboard(App):
         padding: 1;
         layout: horizontal;
     }
-    
+
     .graph-controls {
         height: 1;
         dock: top;
         layout: horizontal;
     }
-    
+
     .graph-label {
         width: auto;
         content-align: left middle;
         color: $text;
         margin-right: 1;
     }
-    
+
     .time-button {
         width: auto;
         min-width: 5;
@@ -161,68 +170,68 @@ class MemoryMonitorDashboard(App):
         background: $surface;
         color: $text-disabled;
     }
-    
+
     .time-button.active {
         background: $primary;
         color: $text;
     }
-    
+
     .graph-spacer {
         width: 1fr;
     }
-    
+
     .graph-value {
         width: auto;
         content-align: right middle;
         color: $success;
         text-style: bold;
     }
-    
+
     .graph-area {
         height: 10;
         layout: horizontal;
         padding: 0;
     }
-    
+
     #graph-display {
         width: 1fr;
         height: 100%;
         color: $success;
         content-align: left middle;
     }
-    
+
     .time-scale {
         height: 1;
         dock: bottom;
         layout: horizontal;
     }
-    
+
     .time-spacer {
         width: 8;
         content-align: left middle;
     }
-    
+
     .time-marker {
         width: auto;
         content-align: left middle;
         color: $text-disabled;
         text-style: italic;
     }
-    
+
     .time-marker-center {
         width: 1fr;
         content-align: center middle;
         color: $text-disabled;
         text-style: italic;
     }
-    
+
     .time-marker-right {
         width: auto;
         content-align: right middle;
         color: $text-disabled;
         text-style: italic;
     }
-    
+
     RichLog {
         background: $surface;
         color: $text;
@@ -258,17 +267,8 @@ class MemoryMonitorDashboard(App):
         self.title = "Xahaud Memory Monitor Dashboard"
         self.sub_title = "Real-time memory monitoring"
 
-        # UI components
-        self.status_bar = None
-        self.monitor_log = None
-        self.process_output = None
-        self.counts_display = None
-        self.jobs_display = None
-        self.catalogue_display = None
-        self.memory_graph = None
-
         # Background task
-        self.monitoring_task = None
+        self.monitoring_task: Optional[asyncio.Task] = None
 
     def compose(self) -> ComposeResult:
         """Create the layout"""

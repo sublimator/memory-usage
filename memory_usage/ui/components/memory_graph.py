@@ -8,8 +8,7 @@ from typing import Deque
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.reactive import reactive
-from textual.widgets import Button, Static
+from textual.widgets import Static
 
 
 class MemoryGraph(Vertical):

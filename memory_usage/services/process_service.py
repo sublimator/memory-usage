@@ -10,7 +10,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import IO, TYPE_CHECKING, Callable, List, Optional
 
 import psutil
 
@@ -39,9 +39,9 @@ class ProcessService:
         self.pid: Optional[int] = None
 
         # Output handling
-        self.stdout_buffer = []
-        self.stderr_buffer = []
-        self.output_thread = None
+        self.stdout_buffer: List[str] = []
+        self.stderr_buffer: List[str] = []
+        self.output_thread: Optional[threading.Thread] = None
         self.stop_output_capture = threading.Event()
 
         # Callbacks
@@ -50,7 +50,7 @@ class ProcessService:
 
         # File logging
         self.log_file_path: Optional[Path] = None
-        self.log_file = None
+        self.log_file: Optional[IO[str]] = None
         self._log_lock = threading.Lock()
 
     def add_stdout_callback(self, callback: Callable[[str], None]):
@@ -77,12 +77,12 @@ class ProcessService:
         self.log_file = open(log_path, "w", buffering=1)  # Line buffered
 
         # Write header
-        self.log_file.write(f"# Rippled Process Output Log\n")
+        self.log_file.write("# Rippled Process Output Log\n")
         self.log_file.write(f"# Binary: {self.binary_path}\n")
         self.log_file.write(f"# Name: {self.name}\n")
         self.log_file.write(f"# PID: {self.pid}\n")
         self.log_file.write(f"# Started: {datetime.now().isoformat()}\n")
-        self.log_file.write(f"#" + "=" * 78 + "\n\n")
+        self.log_file.write("#" + "=" * 78 + "\n\n")
 
         return log_path
 

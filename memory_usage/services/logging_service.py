@@ -6,7 +6,7 @@ import inspect
 import logging
 import os
 from enum import Enum
-from typing import Callable, List, Optional
+from typing import Callable, List
 
 
 class LogLevel(Enum):

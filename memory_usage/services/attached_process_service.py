@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING, Callable, List, Optional
 
 import psutil
 
+from ..config import Config
+
 # Regex to strip ANSI escape sequences
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-from ..config import Config
 
 logger = logging.getLogger(__name__)
 

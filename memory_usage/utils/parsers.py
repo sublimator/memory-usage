@@ -2,11 +2,9 @@
 Parsing utilities for the memory monitor
 """
 
-import configparser
-from pathlib import Path
-from typing import Optional, Tuple
 import logging
-
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +35,13 @@ def parse_rippled_config(config_path: str) -> Tuple[Optional[int], Optional[int]
         if not Path(config_path).exists():
             return None, None
 
-        config = configparser.ConfigParser()
         # Read the file with custom parsing to handle the rippled config format
         with open(config_path, "r") as f:
             config_str = f.read()
 
         # rippled uses a custom format, we need to parse it manually
-        current_section = None
-        sections = {}
+        current_section: Optional[str] = None
+        sections: Dict[str, Dict[str, Any]] = {}
 
         for line in config_str.split("\n"):
             line = line.strip()

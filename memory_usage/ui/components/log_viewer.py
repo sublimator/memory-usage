@@ -2,12 +2,10 @@
 Log viewer components for the dashboard
 """
 
-import asyncio
 import queue
 from typing import Optional, Tuple
 
 from rich.text import Text
-from textual.containers import VerticalScroll
 from textual.widgets import RichLog
 
 
@@ -20,7 +18,7 @@ class QueuedLogViewer(RichLog):
         super().__init__(*args, **kwargs)
         self.title = title
         self.title_style = title_style
-        self.message_queue = queue.Queue()
+        self.message_queue: queue.Queue[Tuple[str, Optional[str]]] = queue.Queue()
         self._initialized = False
         # Enable mouse support for selection
         self.can_focus = True

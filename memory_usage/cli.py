@@ -4,7 +4,6 @@ Command-line interface for Xahaud Memory Monitor
 """
 
 import argparse
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -129,7 +128,7 @@ def run_attach_mode(args):
     if debug_logfile:
         print(f"Debug log: {debug_logfile}")
         if not Path(debug_logfile).exists():
-            print(f"  Warning: Debug log file does not exist yet")
+            print("  Warning: Debug log file does not exist yet")
     else:
         print("Debug log: Not configured or could not be determined")
 

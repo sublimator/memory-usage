@@ -4,11 +4,10 @@ WebSocket connection management
 
 import asyncio
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set, cast
 
 from xrpl.asyncio.clients import AsyncWebsocketClient
-from xrpl.models import Response
-from xrpl.models.requests import ServerInfo, Subscribe, Unsubscribe
+from xrpl.models.requests import ServerInfo, StreamParameter, Subscribe, Unsubscribe
 
 from ..config import Config
 
@@ -22,7 +21,7 @@ class WebSocketManager:
         self.config = config
         self.client: Optional[AsyncWebsocketClient] = None
         self._lock = asyncio.Lock()
-        self._subscribed_streams: set = set()
+        self._subscribed_streams: Set[str] = set()
         self._message_handlers: List[Callable] = []
         self._connection_retries = 0
         self._max_retries = 5
@@ -60,10 +59,8 @@ class WebSocketManager:
 
                     if self._connection_retries < self._max_retries:
                         await asyncio.sleep(5)  # Wait before retry
-                    else:
-                        raise ConnectionError(
-                            f"Failed to connect after {self._max_retries} attempts"
-                        )
+
+            raise ConnectionError(f"Failed to connect after {self._max_retries} attempts")
 
     async def disconnect(self):
         """Close WebSocket connection"""
@@ -74,14 +71,22 @@ class WebSocketManager:
                 self.client = None
                 # Don't clear subscriptions - we might reconnect
 
+    async def _ensure_connected(self) -> AsyncWebsocketClient:
+        """Return an open client, connecting or reconnecting as needed."""
+        if self.client and self.client.is_open():
+            return self.client
+        return await self.connect()
+
     async def subscribe_to_streams(self, streams: List[str]) -> bool:
         """Subscribe to WebSocket streams"""
-        if not self.client or not self.client.is_open():
-            await self.connect()
+        client = await self._ensure_connected()
 
         try:
-            subscribe_request = Subscribe(streams=streams, api_version=self.config.api_version)
-            response = await self.client.request(subscribe_request)
+            stream_params = [StreamParameter(s) for s in streams]
+            subscribe_request = Subscribe(
+                streams=stream_params, api_version=self.config.api_version
+            )
+            response = await client.request(subscribe_request)
 
             if response.is_successful():
                 self._subscribed_streams.update(streams)
@@ -103,7 +108,10 @@ class WebSocketManager:
             return True
 
         try:
-            unsubscribe_request = Unsubscribe(streams=streams, api_version=self.config.api_version)
+            stream_params = [StreamParameter(s) for s in streams]
+            unsubscribe_request = Unsubscribe(
+                streams=stream_params, api_version=self.config.api_version
+            )
             response = await self.client.request(unsubscribe_request)
 
             if response.is_successful():
@@ -120,15 +128,14 @@ class WebSocketManager:
 
     async def get_server_info(self) -> Optional[Dict[str, Any]]:
         """Get server info"""
-        if not self.client or not self.client.is_open():
-            await self.connect()
+        client = await self._ensure_connected()
 
         try:
             server_info_request = ServerInfo(api_version=self.config.api_version)
-            response = await self.client.request(server_info_request)
+            response = await client.request(server_info_request)
 
             if response.is_successful():
-                return response.result.get("info", {})
+                return cast(Dict[str, Any], response.result.get("info", {}))
             else:
                 logger.error(f"Server info request failed: {response}")
                 return None
@@ -139,8 +146,7 @@ class WebSocketManager:
 
     async def get_counts(self) -> Optional[Dict[str, Any]]:
         """Get internal diagnostic counts"""
-        if not self.client or not self.client.is_open():
-            await self.connect()
+        client = await self._ensure_connected()
 
         try:
             # Use GenericRequest for non-standard commands
@@ -151,7 +157,7 @@ class WebSocketManager:
                 api_version=self.config.api_version,
             )
 
-            response = await self.client.request(get_counts_request)
+            response = await client.request(get_counts_request)
 
             if response.is_successful():
                 return response.result
@@ -165,8 +171,7 @@ class WebSocketManager:
 
     async def get_catalogue_status(self) -> Optional[Dict[str, Any]]:
         """Get catalogue loading status"""
-        if not self.client or not self.client.is_open():
-            await self.connect()
+        client = await self._ensure_connected()
 
         try:
             # Use GenericRequest for non-standard commands
@@ -177,7 +182,7 @@ class WebSocketManager:
                 api_version=self.config.api_version,
             )
 
-            response = await self.client.request(catalogue_status_request)
+            response = await client.request(catalogue_status_request)
 
             if response.is_successful():
                 # Debug log to see what we're getting
