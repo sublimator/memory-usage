@@ -10,7 +10,7 @@ from dependency_injector.wiring import Provide, inject
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Footer, Header
+from textual.widgets import Footer, Header, TabbedContent, TabPane
 from textual.worker import Worker
 
 if TYPE_CHECKING:
@@ -37,16 +37,26 @@ from .components import (
 class MemoryMonitorDashboard(App):
     """Main dashboard application with proper DI"""
 
-    # UI components — assigned in compose(), declared here for type narrowing
+    # UI components — assigned in compose(), declared here for type narrowing.
+    # The Stats tab needs its own widget instances (a widget can only be in
+    # one place in the textual tree). Both sets are kept in sync by the
+    # state observer in _setup_state_observer.
     status_bar: StatusBar
     monitor_log: MonitorLogViewer
     process_output: ProcessOutputViewer
+    memory_graph: MemoryGraph
+    # Overview tab diagnostics (compact column on the right)
     counts_display: CountsDisplay
     jobs_display: JobsDisplay
     catalogue_display: CatalogueStatusDisplay
     memory_breakdown_display: MemoryBreakdownDisplay
     shamap_pools_display: SHAMapPoolsDisplay
-    memory_graph: MemoryGraph
+    # Stats tab — same widgets, more room
+    counts_display_stats: CountsDisplay
+    jobs_display_stats: JobsDisplay
+    catalogue_display_stats: CatalogueStatusDisplay
+    memory_breakdown_display_stats: MemoryBreakdownDisplay
+    shamap_pools_display_stats: SHAMapPoolsDisplay
 
     CSS = """
     Screen {
@@ -157,6 +167,40 @@ class MemoryMonitorDashboard(App):
         border: solid $accent;
         padding: 1;
         background: $surface;
+    }
+
+    /* Stats tab: 50/50 horizontal split, no logs/graph competing */
+    #stats-container {
+        height: 100%;
+        width: 100%;
+        layout: horizontal;
+    }
+
+    #stats-left {
+        width: 1fr;
+        height: 100%;
+        layout: vertical;
+    }
+
+    #stats-right {
+        width: 1fr;
+        height: 100%;
+        layout: vertical;
+    }
+
+    /* Inside the stats tab we want the same widget classes to occupy the
+       full available height — override the Overview-tab heights. The
+       counts widget gets all of the left column; right column splits
+       evenly across breakdown / pools / jobs / catalogue. */
+    #stats-left CountsDisplay {
+        height: 100%;
+    }
+
+    #stats-right MemoryBreakdownDisplay,
+    #stats-right SHAMapPoolsDisplay,
+    #stats-right JobsDisplay,
+    #stats-right CatalogueStatusDisplay {
+        height: 1fr;
     }
 
     #memory-graph {
@@ -294,41 +338,61 @@ class MemoryMonitorDashboard(App):
         """Create the layout"""
         yield Header()
 
-        # Status bar
+        # Status bar (always visible above the tabs)
         self.status_bar = StatusBar(self.state_manager)
         yield self.status_bar
 
-        with Horizontal(id="main-container"):
-            # Left 2/3 - Vertical split for monitor logs and rippled output
-            with Vertical(id="left-panel"):
-                with VerticalScroll(id="monitor-log"):
-                    self.monitor_log = MonitorLogViewer()
-                    yield self.monitor_log
+        with TabbedContent(initial="tab-overview"):
+            # ─── Overview: logs + compact stats column + memory graph ───
+            with TabPane("Overview", id="tab-overview"):
+                with Horizontal(id="main-container"):
+                    with Vertical(id="left-panel"):
+                        with VerticalScroll(id="monitor-log"):
+                            self.monitor_log = MonitorLogViewer()
+                            yield self.monitor_log
 
-                with VerticalScroll(id="rippled-output"):
-                    self.process_output = ProcessOutputViewer()
-                    yield self.process_output
+                        with VerticalScroll(id="rippled-output"):
+                            self.process_output = ProcessOutputViewer()
+                            yield self.process_output
 
-            # Right 1/3 - Counts, jobs, and catalogue
-            with Vertical(id="right-panel"):
-                self.counts_display = CountsDisplay()
-                yield self.counts_display
+                    with Vertical(id="right-panel"):
+                        self.counts_display = CountsDisplay()
+                        yield self.counts_display
 
-                self.jobs_display = JobsDisplay()
-                yield self.jobs_display
+                        self.jobs_display = JobsDisplay()
+                        yield self.jobs_display
 
-                self.catalogue_display = CatalogueStatusDisplay()
-                yield self.catalogue_display
+                        self.catalogue_display = CatalogueStatusDisplay()
+                        yield self.catalogue_display
 
-                self.memory_breakdown_display = MemoryBreakdownDisplay()
-                yield self.memory_breakdown_display
+                        self.memory_breakdown_display = MemoryBreakdownDisplay()
+                        yield self.memory_breakdown_display
 
-                self.shamap_pools_display = SHAMapPoolsDisplay()
-                yield self.shamap_pools_display
+                        self.shamap_pools_display = SHAMapPoolsDisplay()
+                        yield self.shamap_pools_display
 
-        # Memory graph at the bottom
-        self.memory_graph = MemoryGraph()
-        yield self.memory_graph
+                self.memory_graph = MemoryGraph()
+                yield self.memory_graph
+
+            # ─── Stats: same widgets, no logs/graph, much more room ───
+            with TabPane("Stats", id="tab-stats"):
+                with Horizontal(id="stats-container"):
+                    with Vertical(id="stats-left"):
+                        self.counts_display_stats = CountsDisplay()
+                        yield self.counts_display_stats
+
+                    with Vertical(id="stats-right"):
+                        self.memory_breakdown_display_stats = MemoryBreakdownDisplay()
+                        yield self.memory_breakdown_display_stats
+
+                        self.shamap_pools_display_stats = SHAMapPoolsDisplay()
+                        yield self.shamap_pools_display_stats
+
+                        self.jobs_display_stats = JobsDisplay()
+                        yield self.jobs_display_stats
+
+                        self.catalogue_display_stats = CatalogueStatusDisplay()
+                        yield self.catalogue_display_stats
 
         yield Footer()
 
@@ -391,16 +455,24 @@ class MemoryMonitorDashboard(App):
         self._last_pid = None  # Track last seen PID to detect process starts
 
         def on_state_change(state: ApplicationState):
-            if state.job_types and self.jobs_display:
+            # Both tabs' diagnostic widgets are kept in sync from a single
+            # state observer — Stats tab has its own instances because a
+            # widget can't appear twice in textual's tree.
+            if state.job_types:
                 self.jobs_display.update_jobs(state.job_types)
-            if state.counts and self.counts_display:
+                self.jobs_display_stats.update_jobs(state.job_types)
+            if state.counts:
                 self.counts_display.update_counts(state.counts)
+                self.counts_display_stats.update_counts(state.counts)
                 # tagged_pointer_pools / treenode_cache_locks ride on counts
                 self.shamap_pools_display.update_counts(state.counts)
-            if state.catalogue_status and self.catalogue_display:
+                self.shamap_pools_display_stats.update_counts(state.counts)
+            if state.catalogue_status:
                 self.catalogue_display.update_catalogue_status(state.catalogue_status)
-            if state.memory_breakdown and self.memory_breakdown_display:
+                self.catalogue_display_stats.update_catalogue_status(state.catalogue_status)
+            if state.memory_breakdown:
                 self.memory_breakdown_display.update_breakdown(state.memory_breakdown)
+                self.memory_breakdown_display_stats.update_breakdown(state.memory_breakdown)
 
             # Detect new process start
             if state.current_pid and state.current_pid != self._last_pid:
