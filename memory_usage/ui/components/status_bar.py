@@ -86,6 +86,13 @@ class StatusBar(Static):
             self.memory_text = "Memory: N/A"
 
         # Update ledgers (combined format)
+        prefix = f"[{state.server_state}] " if state.server_state else ""
+        age_suffix = ""
+        if state.validated_age_s is not None:
+            age_suffix = f" ({state.validated_age_s}s old)"
+        elif state.closed_ledger_age_s is not None:
+            age_suffix = f" (closed {state.closed_ledger_age_s}s old)"
+
         if state.complete_ledgers and state.complete_ledgers != "empty":
             ranges = format_ledger_ranges_display(state.complete_ledgers)
             ledger_count = parse_ledger_ranges(state.complete_ledgers)
@@ -120,9 +127,13 @@ class StatusBar(Static):
             else:
                 ledgers_str += f" ({ledger_count:,} total)"
 
-            self.ledgers_text = ledgers_str
+            self.ledgers_text = f"{prefix}{ledgers_str}{age_suffix}"
+        elif state.closed_ledger_seq is not None:
+            # No validated range yet — fall back to closed_ledger so the
+            # user sees we're at least making progress.
+            self.ledgers_text = f"{prefix}closed #{state.closed_ledger_seq:,}{age_suffix}"
         else:
-            self.ledgers_text = "empty"
+            self.ledgers_text = f"{prefix}empty"
 
         # Update timing
         if state.elapsed_seconds > 0:

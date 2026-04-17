@@ -167,6 +167,7 @@ class MonitoringService:
             # Just do a quick check to get initial state
             server_info = await self.websocket_manager.get_server_info()
             if server_info:
+                self._ingest_server_state_fields(server_info)
                 complete_ledgers = server_info.get("complete_ledgers", "empty")
                 self.complete_ledgers = complete_ledgers
                 if complete_ledgers != "empty":
@@ -201,6 +202,36 @@ class MonitoringService:
             await self.process_manager.stop_current()
             await self.websocket_manager.unsubscribe_from_streams(["ledger"])
             await self.state_manager.update_process_info(None, None)
+
+    def _ingest_server_state_fields(self, server_info: dict) -> None:
+        """Extract ``server_state`` + ledger ages from a server_info dict.
+
+        rippled only emits ``closed_ledger`` when there's no validated ledger
+        yet (early sync / disconnected). Once it has one, ``validated_ledger``
+        is present and ``closed_ledger`` is omitted — so downstream consumers
+        should treat them as mutually exclusive fallbacks.
+        """
+        state = self.state_manager.state
+
+        server_state = server_info.get("server_state")
+        state.server_state = server_state if isinstance(server_state, str) else None
+
+        validated = server_info.get("validated_ledger") or {}
+        if isinstance(validated, dict) and validated:
+            age = validated.get("age")
+            state.validated_age_s = int(age) if isinstance(age, (int, float)) else None
+        else:
+            state.validated_age_s = None
+
+        closed = server_info.get("closed_ledger") or {}
+        if isinstance(closed, dict) and closed:
+            seq = closed.get("seq")
+            age = closed.get("age")
+            state.closed_ledger_seq = int(seq) if isinstance(seq, (int, float)) else None
+            state.closed_ledger_age_s = int(age) if isinstance(age, (int, float)) else None
+        else:
+            state.closed_ledger_seq = None
+            state.closed_ledger_age_s = None
 
     async def stop_monitoring(self, wait_for_process: bool = True):
         """Stop monitoring.
@@ -346,6 +377,7 @@ class MonitoringService:
             )
 
             if isinstance(server_info, dict):
+                self._ingest_server_state_fields(server_info)
                 complete_ledgers = server_info.get("complete_ledgers", "empty")
                 self.complete_ledgers = complete_ledgers  # Update tracked value
 
@@ -479,6 +511,7 @@ class MonitoringService:
 
                 # Handle server_info
                 if isinstance(server_info, dict):
+                    self._ingest_server_state_fields(server_info)
                     complete_ledgers = server_info.get("complete_ledgers", "empty")
 
                     # Extract and store job types

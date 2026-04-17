@@ -48,6 +48,14 @@ class ApplicationState:
     catalogue_status: Optional[Dict[str, Any]] = None
     # Per-VMA RSS breakdown (Linux only)
     memory_breakdown: Optional[Dict[str, Any]] = None
+    # Server state + ledger age diagnostics, pulled from server_info on each
+    # polling/monitoring cycle. Useful before complete_ledgers has any range
+    # (early sync / disconnected) to show the user we're at least making
+    # progress on closed ledgers.
+    server_state: Optional[str] = None  # "syncing", "full", "disconnected", ...
+    validated_age_s: Optional[int] = None
+    closed_ledger_seq: Optional[int] = None
+    closed_ledger_age_s: Optional[int] = None
 
 
 class StateManager:
