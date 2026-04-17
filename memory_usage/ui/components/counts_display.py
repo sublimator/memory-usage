@@ -2,6 +2,7 @@
 Counts display widget for showing get_counts diagnostics
 """
 
+from collections import deque
 from typing import Any, Dict, Optional
 
 from rich.table import Table
@@ -9,6 +10,18 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Static
+
+# Rolling window for the up-count-majority trend detector. At ~2-4s between
+# server_info polls, 30 samples is ~60-120s of recent direction — long
+# enough that one bounce doesn't flip the arrow, short enough that the
+# reading reflects the last minute or two rather than all-time drift.
+_TREND_WINDOW = 30
+# A step-delta counts as a 'move' only when its magnitude exceeds this
+# fraction of the observed range, otherwise the sample is considered flat.
+# Keeps noisy counters (cache sizes that wiggle ±1) from tipping either way.
+_TREND_NOISE = 0.0  # 0 = any non-zero delta; raise if needed
+# Fraction of the window that must agree for the arrow to show.
+_TREND_MAJORITY = 0.6
 
 
 class CountsDisplay(VerticalScroll):
@@ -42,10 +55,20 @@ class CountsDisplay(VerticalScroll):
                     "max": value,
                     "last": value,
                     "ever_decreased": False,
+                    # Rolling window of step-direction signs (+1/0/-1) — used
+                    # by _trend_marker to compute 'went up more often than
+                    # down' over the last ~_TREND_WINDOW samples.
+                    "deltas": deque(maxlen=_TREND_WINDOW),
                 }
                 continue
-            if value < entry["last"]:
+            delta = value - entry["last"]
+            if delta > 0:
+                entry["deltas"].append(1)
+            elif delta < 0:
+                entry["deltas"].append(-1)
                 entry["ever_decreased"] = True
+            else:
+                entry["deltas"].append(0)
             entry["min"] = min(entry["min"], value)
             entry["max"] = max(entry["max"], value)
             entry["last"] = value
@@ -65,20 +88,30 @@ class CountsDisplay(VerticalScroll):
         return bool(value > entry["first"])
 
     def _trend_marker(self, key: str) -> str:
-        """Return an all-time trend arrow (↑/↓/→) or '' if no history yet.
+        """Recent-direction arrow: majority up / down over the last window.
 
-        Based on last vs first observed value — catches creepers that go up
-        and down but net up over the observation window. Paired with the
-        '++' marker (strict monotonic) for two complementary views.
+        Counts positive vs negative step-deltas in the rolling _TREND_WINDOW.
+        Arrow shows only when one direction hits _TREND_MAJORITY of all
+        non-zero moves — mixed or sparse activity renders as empty so the
+        eye doesn't get pulled toward noise. Pairs with '++' (strict 'never
+        decreased'): '++' = always grew, ↑ = usually grows now.
         """
         entry = self._history.get(key)
         if entry is None:
             return ""
-        if entry["last"] > entry["first"]:
-            return "[red]↑[/red]"
-        if entry["last"] < entry["first"]:
-            return "[green]↓[/green]"
-        return "[dim]→[/dim]"
+        deltas = entry["deltas"]
+        if len(deltas) < 5:
+            return ""  # need a few samples before we commit to a direction
+        ups = sum(1 for d in deltas if d > 0)
+        downs = sum(1 for d in deltas if d < 0)
+        moves = ups + downs
+        if moves == 0:
+            return ""  # stable — nothing interesting
+        if ups / moves >= _TREND_MAJORITY:
+            return "[bold red]↑[/bold red]"
+        if downs / moves >= _TREND_MAJORITY:
+            return "[bold green]↓[/bold green]"
+        return ""
 
     def update_counts(self, counts: Optional[Dict[str, Any]]):
         """Update the counts display with new data"""
@@ -104,15 +137,12 @@ class CountsDisplay(VerticalScroll):
         return f"{value}{suffix}"
 
     def _format_counts(self, counts: Dict[str, Any]) -> Table:
-        """Format counts data into a nice table with min/cur/max/trend columns."""
+        """Format counts data into a min/cur/max table with inline markers."""
         table = Table(show_header=True, header_style="bold cyan", box=None, expand=True)
         table.add_column("Metric", style="yellow", ratio=3)
         table.add_column("Min", justify="right", style="dim", ratio=1)
         table.add_column("Cur", justify="right", style="green", ratio=1)
         table.add_column("Max", justify="right", style="dim", ratio=1)
-        # width=5 so the header 'Trend' fits without ellipsis; contents are
-        # the single ↑↓→ arrow centred in that field.
-        table.add_column("Trend", justify="center", width=5, no_wrap=True)
 
         # Group related metrics
         sections = {
@@ -154,7 +184,7 @@ class CountsDisplay(VerticalScroll):
 
         for section, metrics in sections.items():
             # Section header (spans the metric column; others stay blank)
-            table.add_row(f"[bold]{section}[/bold]", "", "", "", "", style="bold magenta")
+            table.add_row(f"[bold]{section}[/bold]", "", "", "", style="bold magenta")
 
             for key, display_name, suffix in metrics:
                 if key not in counts:
@@ -170,19 +200,24 @@ class CountsDisplay(VerticalScroll):
                 else:
                     min_str = ""
                     max_str = ""
-                # Eyeball marker: strict monotonic grower (never decreased).
-                marker = (
+
+                # Two inline markers: recent-window trend arrow, then '++'
+                # for strict all-time monotonic. Both are space-prefixed so
+                # they only appear when relevant — keeps rows clean when the
+                # metric is boring.
+                trend = self._trend_marker(key)
+                monotonic = (
                     " [bold red]++[/bold red]" if self._is_monotonic_growing(key, value) else ""
                 )
+                name_markers = f"{' ' + trend if trend else ''}{monotonic}"
                 table.add_row(
-                    f"  {display_name}{marker}",
+                    f"  {display_name}{name_markers}",
                     min_str,
                     cur_str,
                     max_str,
-                    self._trend_marker(key),
                 )
 
             # Add spacing between sections
-            table.add_row("", "", "", "", "")
+            table.add_row("", "", "", "")
 
         return table
