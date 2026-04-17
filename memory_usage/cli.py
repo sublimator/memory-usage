@@ -179,8 +179,13 @@ def run_heap_trend(args):
     """Per-class heap growth across all heap_sample events in a session dir."""
     dir_path = _resolve_or_exit(args)
     events_path = dir_path / "events.jsonl"
-    rows = build_heap_trend(events_path, binary=args.binary, grep=args.grep)
-    render_heap_trend(rows, top_n=args.top, monotonic_only=args.monotonic)
+    rows, meta = build_heap_trend(
+        events_path,
+        binary=args.binary,
+        grep=args.grep,
+        include_non_object=args.include_non_object,
+    )
+    render_heap_trend(rows, meta=meta, top_n=args.top, monotonic_only=args.monotonic)
 
 
 def run_find(args):
@@ -591,6 +596,13 @@ def run():
         type=str,
         default=None,
         help="Only aggregate rows whose class matches this regex",
+    )
+    trend_parser.add_argument(
+        "--include-non-object",
+        action="store_true",
+        help="Include the 'non-object' (raw malloc, typeless) bucket. Often "
+        "dominant in class view — hidden by default so it doesn't swamp "
+        "per-class signal, but worth surfacing when class-level trends look flat.",
     )
 
     # Summary command — one-screen triage view of a session dir

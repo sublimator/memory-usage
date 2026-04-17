@@ -31,11 +31,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# count    bytes    avg       class_name (possibly with spaces/parens)    C|O    binary
-# The non-greedy (.+?) for class_name is anchored by the fixed C/O one-
-# char column + binary basename that follow. Works for both C (class) and
-# O (ObjC object) rows.
-_ROW_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(.+?)\s+([CO])\s+(\S+)\s*$")
+# Two flavors of heap(1) rows:
+#   count  bytes  avg  class_name  C|O  binary       ← typed row
+#   count  bytes  avg  non-object                    ← typeless (raw malloc)
+# We accept both by making the C|O + binary optional and tagging the
+# typeless case with type="N" (non-object). Non-object is often where
+# the interesting growth hides in class view, so we keep it in the list
+# and let downstream commands decide whether to surface it.
+_ROW_RE_TYPED = re.compile(r"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(.+?)\s+([CO])\s+(\S+)\s*$")
+_ROW_RE_BARE = re.compile(r"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(.+?)\s*$")
 
 
 def is_supported() -> bool:
@@ -213,16 +217,30 @@ def _parse_heap_output(stdout: str) -> List[Dict[str, Any]]:
     match the regex are silently skipped.
     """
     by_key: Dict[tuple, Dict[str, Any]] = {}
+    # Rows that summarise the whole sample rather than a bucket — skip them
+    # so they don't dominate the top-K like an uncategorised giant class.
+    summary_labels = {"total", "all zones", "process"}
     for line in stdout.splitlines():
-        m = _ROW_RE.match(line)
-        if not m:
-            continue
-        count = int(m.group(1))
-        byt = int(m.group(2))
-        avg = float(m.group(3))
-        cls = m.group(4).strip()
-        typ = m.group(5)
-        binary = m.group(6)
+        typed = _ROW_RE_TYPED.match(line)
+        if typed:
+            count = int(typed.group(1))
+            byt = int(typed.group(2))
+            avg = float(typed.group(3))
+            cls = typed.group(4).strip()
+            typ = typed.group(5)
+            binary = typed.group(6)
+        else:
+            bare = _ROW_RE_BARE.match(line)
+            if not bare:
+                continue
+            count = int(bare.group(1))
+            byt = int(bare.group(2))
+            avg = float(bare.group(3))
+            cls = bare.group(4).strip()
+            typ = "N"  # non-object (typeless) — raw malloc, no C++/ObjC typeinfo
+            binary = ""
+            if cls.lower() in summary_labels or cls.lower().startswith("all "):
+                continue
         key = (cls, binary, typ)
         existing = by_key.get(key)
         if existing is None:
@@ -303,21 +321,28 @@ def build_heap_trend(
     events_path: Path,
     binary: Optional[str] = None,
     grep: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    include_non_object: bool = False,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Walk events.jsonl and aggregate per-class heap size over time.
 
-    Emits one row per (class, binary) that appeared in any snapshot's
-    heap_sample. The "monotonic" column is the real signal — a class that
-    never shrinks between consecutive samples is a genuine leak suspect
-    (as opposed to a churning pool that climbs and sweeps).
+    Returns ``(rows, meta)``:
+      - ``rows``: one per (class, binary) with first/last/max/monotonic.
+      - ``meta``: {sample_count, alloc_site_samples, class_samples} — the
+        caller uses this to decide whether to print a "MallocStackLogging
+        active" banner. Without that warning users read a flat trend and
+        think they're done, when really they're looking at a ~5% sample
+        of allocations grouped by call site.
 
-    Caveat: classes fall in and out of the top-50 over time. We treat
-    "absent from a sample" as "no data" (not as decreased), so a class
-    that merely drops out of top-50 isn't disqualified from monotonic.
+    ``include_non_object`` defaults to False because the "non-object"
+    bucket can dominate and hide the class-level signal; turn it on to
+    surface that row explicitly (that's where class-view growth often
+    lives on C++ code with few RTTI types).
     """
     # class_key -> list of (sample_index, bytes, count, binary, type)
     per_class: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     sample_index = 0
+    alloc_site_samples = 0
+    class_samples = 0
 
     with open(events_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -334,9 +359,17 @@ def build_heap_trend(
             if not isinstance(sample, dict) or not sample.get("ok"):
                 continue
             sample_index += 1
+            mode = sample.get("mode") or "class"
+            if mode == "alloc-site":
+                alloc_site_samples += 1
+            else:
+                class_samples += 1
             for row in sample.get("top") or []:
                 cls = row.get("class") or ""
                 bin_ = row.get("binary") or ""
+                typ = row.get("type") or ""
+                if not include_non_object and typ == "N":
+                    continue
                 if binary and binary.lower() not in bin_.lower():
                     continue
                 if grep:
@@ -351,7 +384,7 @@ def build_heap_trend(
                         "sample_idx": sample_index,
                         "bytes": int(row.get("bytes") or 0),
                         "count": int(row.get("count") or 0),
-                        "type": row.get("type") or "",
+                        "type": typ,
                     }
                 )
 
@@ -390,23 +423,55 @@ def build_heap_trend(
     # Default ordering: biggest delta first; monotonic climbers stick out
     # naturally because they keep gaining without ever giving back.
     results.sort(key=lambda r: -r["delta_bytes"])
-    return results
+    meta = {
+        "sample_count": sample_index,
+        "alloc_site_samples": alloc_site_samples,
+        "class_samples": class_samples,
+    }
+    return results, meta
 
 
 def render_heap_trend(
     rows: List[Dict[str, Any]],
+    meta: Optional[Dict[str, Any]] = None,
     top_n: int = 50,
     monotonic_only: bool = False,
 ) -> None:
     """Pretty-print a heap_trend table. Highlights monotonic growers.
 
     Rows are already sorted by Δbytes desc; callers pick how many to show.
-    `monotonic_only` filters to leak-shaped climbers only.
+    ``monotonic_only`` filters to leak-shaped climbers only. ``meta``
+    drives the mode banner — without it users may read a flat class
+    trend while actually looking at MallocStackLogging call-site data
+    and think they're done.
     """
     from rich.console import Console
     from rich.table import Table
 
     console = Console()
+
+    if meta:
+        n = meta.get("sample_count") or 0
+        alloc_site = meta.get("alloc_site_samples") or 0
+        if n == 0:
+            console.print("[yellow]no heap samples in events.jsonl[/yellow]")
+            return
+        if alloc_site and alloc_site == n:
+            console.print(
+                "[yellow]banner:[/yellow] all "
+                f"{n} sample(s) were in [bold]alloc-site[/bold] mode "
+                "(MallocStackLogging active). This view groups by call site "
+                "and only captures a sample of allocations — 'flat' trends "
+                "do NOT mean memory is steady. Disable MallocStackLogging "
+                "for a true class-level view."
+            )
+        elif alloc_site:
+            console.print(
+                f"[yellow]banner:[/yellow] {alloc_site} of {n} samples were "
+                "alloc-site mode (MallocStackLogging) and {} were class view; "
+                "trends below mix the two.".format(meta.get("class_samples") or 0)
+            )
+
     filtered = [r for r in rows if r["monotonic"]] if monotonic_only else rows
     if not filtered:
         note = "monotonic-only filter in effect" if monotonic_only else "no data"
