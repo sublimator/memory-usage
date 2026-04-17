@@ -172,9 +172,16 @@ class MemoryMonitorDashboard(App):
         background: $surface;
     }
 
+    /* Fill whatever height is left after Header + status bar + Footer.
+       Without this the TabPane content collapses to 0 because its
+       parent has no explicit size to percent from. */
+    TabbedContent {
+        height: 1fr;
+    }
+
     /* Stats tab: 50/50 horizontal split, no logs/graph competing */
     #stats-container {
-        height: 100%;
+        height: 1fr;
         width: 100%;
         layout: horizontal;
     }
