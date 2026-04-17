@@ -32,6 +32,12 @@ class Config(BaseSettings):
     use_vmmap: bool = Field(default=True)
     breakdown_interval_seconds: int = Field(default=15)
 
+    # When True, any existing session dir for this (pid, create_time) is
+    # moved aside to <name>.bak-<ts> on open so hydration is skipped and a
+    # clean events.jsonl/meta.json is written. Useful when the prior meta
+    # is stale/truncated and you want a clean slate without rm -rf.
+    fresh_session: bool = Field(default=False)
+
     # Binary selection
     specified_binaries: Optional[List[str]] = Field(default=None)
 

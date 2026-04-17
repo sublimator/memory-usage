@@ -151,6 +151,7 @@ def run_attach_mode(args):
         websocket_retry_delay_seconds=args.ws_retry_delay,
         use_vmmap=not args.no_vmmap,
         breakdown_interval_seconds=args.breakdown_interval,
+        fresh_session=args.fresh,
         # Attach mode specific
         attach_mode=True,
         attach_pid=proc.pid,
@@ -271,6 +272,12 @@ def run():
         default=15,
         help="Seconds between full memory breakdown refreshes (default: 15)",
     )
+    monitor_parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Move any existing session dir aside (.bak-<ts>) and start clean "
+        "— no reattach hydration.",
+    )
 
     # Logs command
     subparsers.add_parser("logs", help="Tail the latest process output log file")
@@ -341,6 +348,12 @@ def run():
         default=15,
         help="Seconds between full memory breakdown refreshes (default: 15)",
     )
+    attach_parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Move any existing session dir aside (.bak-<ts>) and start clean "
+        "— no reattach hydration.",
+    )
 
     # Parse args
     args = parser.parse_args()
@@ -400,6 +413,7 @@ def run():
         websocket_retry_delay_seconds=args.ws_retry_delay,
         use_vmmap=not args.no_vmmap,
         breakdown_interval_seconds=args.breakdown_interval,
+        fresh_session=args.fresh,
     )
 
     # Configure DI container
