@@ -18,6 +18,7 @@ from .utils import (
     get_process_by_pid,
     parse_rippled_config,
 )
+from .utils.heap_sampler import render_heap_sample, take_heap_sample
 from .utils.ledger_diff import (
     build_and_render_summary,
     find_delta_matches,
@@ -138,6 +139,32 @@ def run_summary(args):
         except (OSError, _json.JSONDecodeError):
             pass
     build_and_render_summary(events_path, meta, top_n=args.top)
+
+
+def run_heap(args):
+    """On-demand heap sample of the running rippled/xahaud."""
+    import json as _json
+
+    if args.pid:
+        pid = args.pid
+    else:
+        procs = find_rippled_processes()
+        if not procs:
+            print("error: no running rippled/xahaud — pass --pid PID", file=sys.stderr)
+            sys.exit(2)
+        if len(procs) > 1:
+            names = ", ".join(f"{p.name}(pid {p.pid})" for p in procs)
+            print(f"error: multiple rippled processes ({names}) — pass --pid PID", file=sys.stderr)
+            sys.exit(2)
+        pid = procs[0].pid
+
+    sample = take_heap_sample(pid, top_n=args.top)
+    if args.json:
+        print(_json.dumps(sample, indent=2))
+        return
+    render_heap_sample(sample)
+    if not sample.get("ok"):
+        sys.exit(1)
 
 
 def run_find(args):
@@ -455,6 +482,30 @@ def run():
         help="Root containing session dirs (default: memory_monitor_results)",
     )
 
+    # Heap command — one-shot macOS heap(1) sample of the running rippled.
+    heap_parser = subparsers.add_parser(
+        "heap",
+        help="Run macOS heap(1) on the running rippled and print the top allocs",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    heap_parser.add_argument(
+        "--pid",
+        "-p",
+        type=int,
+        help="PID to sample (defaults to the unique running rippled)",
+    )
+    heap_parser.add_argument(
+        "--top",
+        type=int,
+        default=50,
+        help="Top N classes by bytes (default: 50)",
+    )
+    heap_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON to stdout instead of a rich table",
+    )
+
     # Summary command — one-screen triage view of a session dir
     summary_parser = subparsers.add_parser(
         "summary",
@@ -552,6 +603,10 @@ def run():
 
     if args.command == "summary":
         run_summary(args)
+        return
+
+    if args.command == "heap":
+        run_heap(args)
         return
 
     # Handle monitor command
