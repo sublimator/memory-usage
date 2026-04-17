@@ -446,7 +446,8 @@ def run():
         "field",
         type=str,
         help="Dotted path (rss_mb, counts.AL_size, memory_breakdown.anonymous_mb) "
-        "or derived (heap_mb = rss minus mmap'd nodestore + other files)",
+        "or derived: heap_mb (rss minus mmap), pool_current_mb, pool_peak_mb, "
+        "pool_wasted_mb (tagged_pointer_pools._total.*_bytes in MB)",
     )
     find_parser.add_argument(
         "op",

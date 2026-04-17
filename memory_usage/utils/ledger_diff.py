@@ -121,12 +121,23 @@ def _fmt_uptime(seconds: Optional[int]) -> str:
     return f"{d}d{h:02d}h"
 
 
+_POOL_SHORTCUTS = {
+    "pool_current_mb": "current_bytes",
+    "pool_peak_mb": "peak_bytes",
+    "pool_wasted_mb": "cached_wasted_bytes",
+}
+
+
 def _derived(snapshot: Dict[str, Any], name: str) -> Optional[float]:
     """Computed fields — not in the raw event, derived from others.
 
-    ``heap_mb`` = rss_mb minus nodestore mmap minus other file-backed mmap.
-    Isolates the part of RSS that's actually heap allocations, which is what
-    you want to track when hunting leaks separately from nodestore paging.
+    - ``heap_mb`` = rss_mb minus mmap'd nodestore + other file-backed. The
+      part of RSS that's actually heap, i.e. what you compare against
+      object-count growth when hunting leaks.
+    - ``pool_current_mb`` / ``pool_peak_mb`` / ``pool_wasted_mb`` unwrap
+      the deeply-nested ``counts.tagged_pointer_pools._total.*_bytes``
+      fields into MB, since those dominate real memory movement on
+      patched-rippled builds and the dotted path is painful to type.
     """
     if name == "heap_mb":
         rss = snapshot.get("rss_mb")
@@ -141,6 +152,15 @@ def _derived(snapshot: Dict[str, Any], name: str) -> Optional[float]:
         if isinstance(other, (int, float)):
             paged += float(other)
         return float(rss) - paged
+
+    if name in _POOL_SHORTCUTS:
+        pool = (snapshot.get("counts") or {}).get("tagged_pointer_pools", {}).get("_total", {})
+        if not isinstance(pool, dict):
+            return None
+        raw = pool.get(_POOL_SHORTCUTS[name])
+        if not isinstance(raw, (int, float)):
+            return None
+        return float(raw) / (1024 * 1024)
     return None
 
 
