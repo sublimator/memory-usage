@@ -211,10 +211,20 @@ def _derived(snapshot: Dict[str, Any], name: str) -> Optional[float]:
         rss = _coerce_float(snapshot.get("rss_mb"))
         if rss is None:
             return None
-        bd = snapshot.get("memory_breakdown") or {}
-        nodestore = _coerce_float(bd.get("nodestore_mb") if isinstance(bd, dict) else None)
-        other = _coerce_float(bd.get("other_file_mb") if isinstance(bd, dict) else None)
-        return rss - (nodestore or 0.0) - (other or 0.0)
+        # heap_mb requires a *populated* breakdown. Early snapshots (before
+        # the first breakdown refresh) have memory_breakdown=None; treating
+        # nodestore_mb as 0 there made heap_mb collapse to rss_mb and
+        # produced fake multi-GB reclaims in first-vs-last diffs. If the
+        # breakdown isn't ready or nodestore_mb is missing, refuse — callers
+        # already skip rows where _lookup returns None.
+        bd = snapshot.get("memory_breakdown")
+        if not isinstance(bd, dict) or not bd:
+            return None
+        nodestore = _coerce_float(bd.get("nodestore_mb"))
+        if nodestore is None:
+            return None
+        other = _coerce_float(bd.get("other_file_mb")) or 0.0
+        return rss - nodestore - other
 
     if name in _POOL_SHORTCUTS:
         pool = (snapshot.get("counts") or {}).get("tagged_pointer_pools", {}).get("_total", {})
