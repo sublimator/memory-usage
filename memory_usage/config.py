@@ -38,6 +38,13 @@ class Config(BaseSettings):
     # is stale/truncated and you want a clean slate without rm -rf.
     fresh_session: bool = Field(default=False)
 
+    # macOS heap(1) sampling cadence. 0 = off (default). When > 0, after
+    # rippled reaches server_state=="full" we run heap on every Nth ledger
+    # close and attach the top-50 class histogram to subsequent snapshots.
+    # Gated heavily because heap suspends the target via task_for_pid and
+    # takes seconds on a fat process.
+    heap_every_ledger: int = Field(default=0)
+
     # Binary selection
     specified_binaries: Optional[List[str]] = Field(default=None)
 

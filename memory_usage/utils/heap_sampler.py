@@ -22,12 +22,14 @@ flag, don't stack calls) — this module is dumb and fires on demand.
 
 from __future__ import annotations
 
+import json
 import platform
 import re
 import subprocess
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 # count    bytes    avg       class_name (possibly with spaces/parens)    C|O    binary
 # The non-greedy (.+?) for class_name is anchored by the fixed C/O one-
@@ -148,7 +150,57 @@ def take_heap_sample(
         "total_bytes": total_bytes,
         "row_count": len(rows),
         "top": top,
+        "mode": detect_mode(top),
     }
+
+
+def detect_mode(rows: List[Dict[str, Any]]) -> str:
+    """class view vs alloc-site view.
+
+    With MallocStackLogging enabled, heap groups by call-site so class names
+    read "malloc in FUNCTION_NAME" or similar. Without it, rows are honest
+    class names ("SHAMapInnerNode", "std::__1::vector"). The >50% heuristic
+    on the top-N is enough because MSL transforms ~every line.
+
+    Returned literally as "alloc-site" or "class" — callers render it in
+    the header so users know which question they're answering.
+    """
+    if not rows:
+        return "class"
+    alloc_site_hits = sum(1 for r in rows if (r.get("class") or "").startswith("malloc in "))
+    return "alloc-site" if alloc_site_hits * 2 > len(rows) else "class"
+
+
+def filter_sample(
+    sample: Dict[str, Any],
+    binary: Optional[str] = None,
+    grep: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return a new sample with ``top`` filtered (non-destructive).
+
+    - ``binary``: substring match on the binary column (``xrpld`` catches
+      ``xrpld``/``libxrpld.dylib`` but not ``libcrypto``).
+    - ``grep``: regex match on the class column.
+
+    Row-count / total_bytes stay the original (pre-filter) values so the
+    header still tells the user how much was pruned.
+    """
+    if not sample.get("ok"):
+        return sample
+    rows = list(sample.get("top") or [])
+    if binary:
+        needle = binary.lower()
+        rows = [r for r in rows if needle in (r.get("binary") or "").lower()]
+    if grep:
+        try:
+            pat = re.compile(grep)
+        except re.error:
+            pat = re.compile(re.escape(grep))
+        rows = [r for r in rows if pat.search(r.get("class") or "")]
+    # Re-rank filtered rows so display is still numbered 1..N.
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+    return {**sample, "top": rows, "filtered": bool(binary or grep)}
 
 
 def _parse_heap_output(stdout: str) -> List[Dict[str, Any]]:
@@ -204,10 +256,17 @@ def render_heap_sample(sample: Dict[str, Any], top_n: Optional[int] = None) -> N
     total_mb = (sample.get("total_bytes") or 0) / (1024 * 1024)
     row_count = sample.get("row_count") or 0
     duration_ms = sample.get("duration_ms") or 0
+    mode = sample.get("mode") or "class"
+    mode_note = (
+        " [yellow](MallocStackLogging active — alloc-site view, not class view)[/yellow]"
+        if mode == "alloc-site"
+        else ""
+    )
+    filtered_note = " [dim](filtered)[/dim]" if sample.get("filtered") else ""
     console.print(
-        f"[bold cyan]heap pid {pid}[/bold cyan]  "
+        f"[bold cyan]heap pid {pid}[/bold cyan] mode={mode}{mode_note}  "
         f"[dim]{row_count:,} classes  {total_mb:,.1f} MB total  "
-        f"({duration_ms} ms)[/dim]"
+        f"({duration_ms} ms){filtered_note}[/dim]"
     )
 
     top = sample.get("top") or []
@@ -231,5 +290,157 @@ def render_heap_sample(sample: Dict[str, Any], top_n: Optional[int] = None) -> N
             f"{row.get('avg', 0):,.1f}",
             row.get("class") or "",
             row.get("binary") or "",
+        )
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# heap-trend: per-class growth across all heap_sample events in events.jsonl
+# ---------------------------------------------------------------------------
+
+
+def build_heap_trend(
+    events_path: Path,
+    binary: Optional[str] = None,
+    grep: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Walk events.jsonl and aggregate per-class heap size over time.
+
+    Emits one row per (class, binary) that appeared in any snapshot's
+    heap_sample. The "monotonic" column is the real signal — a class that
+    never shrinks between consecutive samples is a genuine leak suspect
+    (as opposed to a churning pool that climbs and sweeps).
+
+    Caveat: classes fall in and out of the top-50 over time. We treat
+    "absent from a sample" as "no data" (not as decreased), so a class
+    that merely drops out of top-50 isn't disqualified from monotonic.
+    """
+    # class_key -> list of (sample_index, bytes, count, binary, type)
+    per_class: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    sample_index = 0
+
+    with open(events_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("event") != "snapshot":
+                continue
+            sample = ev.get("heap_sample")
+            if not isinstance(sample, dict) or not sample.get("ok"):
+                continue
+            sample_index += 1
+            for row in sample.get("top") or []:
+                cls = row.get("class") or ""
+                bin_ = row.get("binary") or ""
+                if binary and binary.lower() not in bin_.lower():
+                    continue
+                if grep:
+                    try:
+                        pat = re.compile(grep)
+                    except re.error:
+                        pat = re.compile(re.escape(grep))
+                    if not pat.search(cls):
+                        continue
+                per_class.setdefault((cls, bin_), []).append(
+                    {
+                        "sample_idx": sample_index,
+                        "bytes": int(row.get("bytes") or 0),
+                        "count": int(row.get("count") or 0),
+                        "type": row.get("type") or "",
+                    }
+                )
+
+    results: List[Dict[str, Any]] = []
+    for (cls, bin_), series in per_class.items():
+        if not series:
+            continue
+        series.sort(key=lambda s: s["sample_idx"])
+        first = series[0]
+        last = series[-1]
+        # Monotonic = never decreased between consecutive *appearances*.
+        # Skipping samples where the class fell off top-N is fine; we
+        # only have data when we have data.
+        ever_decreased = False
+        prev_bytes = series[0]["bytes"]
+        for s in series[1:]:
+            if s["bytes"] < prev_bytes:
+                ever_decreased = True
+                break
+            prev_bytes = s["bytes"]
+        results.append(
+            {
+                "class": cls,
+                "binary": bin_,
+                "samples": len(series),
+                "first_bytes": first["bytes"],
+                "last_bytes": last["bytes"],
+                "max_bytes": max(s["bytes"] for s in series),
+                "delta_bytes": last["bytes"] - first["bytes"],
+                "first_count": first["count"],
+                "last_count": last["count"],
+                "monotonic": not ever_decreased,
+            }
+        )
+
+    # Default ordering: biggest delta first; monotonic climbers stick out
+    # naturally because they keep gaining without ever giving back.
+    results.sort(key=lambda r: -r["delta_bytes"])
+    return results
+
+
+def render_heap_trend(
+    rows: List[Dict[str, Any]],
+    top_n: int = 50,
+    monotonic_only: bool = False,
+) -> None:
+    """Pretty-print a heap_trend table. Highlights monotonic growers.
+
+    Rows are already sorted by Δbytes desc; callers pick how many to show.
+    `monotonic_only` filters to leak-shaped climbers only.
+    """
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    filtered = [r for r in rows if r["monotonic"]] if monotonic_only else rows
+    if not filtered:
+        note = "monotonic-only filter in effect" if monotonic_only else "no data"
+        console.print(f"[dim]heap-trend: {note}[/dim]")
+        return
+
+    shown = filtered[:top_n]
+    total = len(filtered)
+    mono_count = sum(1 for r in rows if r["monotonic"])
+    console.print(
+        f"[bold cyan]heap trend[/bold cyan]  "
+        f"[dim]{total:,} classes seen, {mono_count} monotonic; showing top {len(shown)}[/dim]"
+    )
+    table = Table(header_style="bold cyan", box=None)
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Mono", justify="center")
+    table.add_column("Class", style="yellow")
+    table.add_column("Binary", style="dim")
+    table.add_column("Samples", justify="right", style="dim")
+    table.add_column("First MB", justify="right", style="dim")
+    table.add_column("Last MB", justify="right", style="green")
+    table.add_column("Δ MB", justify="right")
+    for i, r in enumerate(shown, 1):
+        delta = r["delta_bytes"]
+        style = "red" if delta > 0 else ("green" if delta < 0 else "dim")
+        mono = "[bold red]↑↑[/bold red]" if r["monotonic"] and delta > 0 else ""
+        table.add_row(
+            str(i),
+            mono,
+            r["class"],
+            r["binary"],
+            str(r["samples"]),
+            f"{r['first_bytes'] / (1024 * 1024):,.2f}",
+            f"{r['last_bytes'] / (1024 * 1024):,.2f}",
+            f"[{style}]{delta / (1024 * 1024):+,.2f}[/{style}]",
         )
     console.print(table)

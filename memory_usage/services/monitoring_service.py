@@ -14,6 +14,8 @@ import psutil
 
 from ..models.memory_models import BinaryTestResult, MemorySnapshot, SystemInfo, TestConfiguration
 from ..utils.formatters import format_duration, format_ledger_ranges
+from ..utils.heap_sampler import is_supported as heap_supported
+from ..utils.heap_sampler import take_heap_sample
 from ..utils.memory_breakdown import MemoryBreakdown
 from ..utils.parsers import parse_ledger_ranges
 from ..utils.session_store import SessionStore
@@ -80,6 +82,13 @@ class MonitoringService:
         # expensive smaps/vmmap parse doesn't block the event loop every
         # ledger close). None until the first refresh task tick completes.
         self.latest_breakdown: Optional[MemoryBreakdown] = None
+        # Most recent macOS heap(1) sample. Populated asynchronously when
+        # --heap-every-ledger is enabled; stays None otherwise. The "sticky
+        # latest" model means every snapshot after a sample carries the
+        # same heap picture until a new sample lands, ~matching how
+        # memory_breakdown works.
+        self.latest_heap_sample: Optional[Dict[str, Any]] = None
+        self._heap_sampling_in_flight: bool = False
 
         # Ensure the output root exists — per-binary session dirs are created
         # lazily inside SessionStore when we know pid + create_time.
@@ -653,6 +662,50 @@ class MonitoringService:
                 else None,
             )
 
+            # Fire-and-forget heap sample on every Nth ledger once the node
+            # is synced. `server_state == "full"` keeps us out of heap's way
+            # during peer catchup; the in-flight gate means we never stack
+            # two samples even if N is small relative to heap runtime.
+            self._maybe_schedule_heap_sample(ledger_index)
+
+    def _maybe_schedule_heap_sample(self, ledger_index: Optional[int]) -> None:
+        every = self.config.heap_every_ledger
+        if (
+            every <= 0
+            or ledger_index is None
+            or ledger_index % every != 0
+            or self._heap_sampling_in_flight
+            or self.state_manager.state.server_state != "full"
+            or not heap_supported()
+        ):
+            return
+        proc = self.process_manager.get_current_process()
+        if proc is None or proc.pid is None:
+            return
+        self._heap_sampling_in_flight = True
+        pid = proc.pid
+        asyncio.create_task(self._run_heap_sample(pid))
+
+    async def _run_heap_sample(self, pid: int) -> None:
+        """Run heap(1) off the event loop; publish result to state."""
+        try:
+            sample = await asyncio.to_thread(take_heap_sample, pid, 50)
+            if sample.get("ok"):
+                self.latest_heap_sample = sample
+                self.state_manager.state.heap_sample = sample
+                await self.state_manager._notify_observers()
+                total_mb = (sample.get("total_bytes") or 0) / (1024 * 1024)
+                self.logger.info(
+                    f"heap: {sample.get('row_count'):,} classes, "
+                    f"{total_mb:,.1f} MB total ({sample.get('duration_ms')} ms)"
+                )
+            else:
+                self.logger.warning(f"heap sample failed: {sample.get('error')}")
+        except Exception as e:
+            self.logger.error(f"heap sampling error: {e}")
+        finally:
+            self._heap_sampling_in_flight = False
+
     @staticmethod
     def _get_process_create_time(pid: int) -> float:
         """psutil create_time (epoch seconds, subsecond precision).
@@ -854,6 +907,8 @@ class MonitoringService:
         self._peak_rss_mb = 0.0
         self._peak_anon_mb = 0.0
         self.latest_breakdown = None
+        self.latest_heap_sample = None
+        self._heap_sampling_in_flight = False
 
         self.logger.info(f"Initialized result tracking for {binary_name}")
 
@@ -916,6 +971,7 @@ class MonitoringService:
             job_types=self.latest_job_types,
             memory_breakdown=breakdown_dict,
             catalogue_status=self.latest_catalogue_status,
+            heap_sample=self.latest_heap_sample,
             sync_start_ledger=s.sync_start_ledger,
             server_state=s.server_state,
             validated_age_s=s.validated_age_s,

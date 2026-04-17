@@ -33,6 +33,12 @@ class MemorySnapshot(BaseModel):
     memory_breakdown: Optional[Dict[str, Any]] = None
     catalogue_status: Optional[Dict[str, Any]] = None  # Xahau-only
 
+    # macOS heap(1) sample (class histogram), populated on every N-th ledger
+    # when --heap-every-ledger is enabled. Carried in every subsequent
+    # snapshot until the next sample lands so the UI + jsonl consumers
+    # always see the most recent heap picture.
+    heap_sample: Optional[Dict[str, Any]] = None
+
     # Fields folded in from server_info so the dashboard can repaint the
     # status bar immediately on reattach — otherwise they stay blank until
     # the next periodic RPC fires (~2-3s).

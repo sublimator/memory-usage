@@ -18,7 +18,13 @@ from .utils import (
     get_process_by_pid,
     parse_rippled_config,
 )
-from .utils.heap_sampler import render_heap_sample, take_heap_sample
+from .utils.heap_sampler import (
+    build_heap_trend,
+    filter_sample,
+    render_heap_sample,
+    render_heap_trend,
+    take_heap_sample,
+)
 from .utils.ledger_diff import (
     build_and_render_summary,
     find_delta_matches,
@@ -159,12 +165,22 @@ def run_heap(args):
         pid = procs[0].pid
 
     sample = take_heap_sample(pid, top_n=args.top)
+    if args.binary or args.grep:
+        sample = filter_sample(sample, binary=args.binary, grep=args.grep)
     if args.json:
         print(_json.dumps(sample, indent=2))
         return
     render_heap_sample(sample)
     if not sample.get("ok"):
         sys.exit(1)
+
+
+def run_heap_trend(args):
+    """Per-class heap growth across all heap_sample events in a session dir."""
+    dir_path = _resolve_or_exit(args)
+    events_path = dir_path / "events.jsonl"
+    rows = build_heap_trend(events_path, binary=args.binary, grep=args.grep)
+    render_heap_trend(rows, top_n=args.top, monotonic_only=args.monotonic)
 
 
 def run_find(args):
@@ -257,6 +273,7 @@ def run_attach_mode(args):
         use_vmmap=not args.no_vmmap,
         breakdown_interval_seconds=args.breakdown_interval,
         fresh_session=args.fresh,
+        heap_every_ledger=args.heap_every_ledger,
         # Attach mode specific
         attach_mode=True,
         attach_pid=proc.pid,
@@ -383,6 +400,14 @@ def run():
         help="Move any existing session dir aside (.bak-<ts>) and start clean "
         "— no reattach hydration.",
     )
+    monitor_parser.add_argument(
+        "--heap-every-ledger",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Run macOS heap(1) on every Nth ledger once synced; top-50 classes "
+        "land in the snapshot (default: 0 = off, heap suspends target)",
+    )
 
     # Logs command
     subparsers.add_parser("logs", help="Tail the latest process output log file")
@@ -459,6 +484,14 @@ def run():
         help="Move any existing session dir aside (.bak-<ts>) and start clean "
         "— no reattach hydration.",
     )
+    attach_parser.add_argument(
+        "--heap-every-ledger",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Run macOS heap(1) on every Nth ledger once synced; top-50 classes "
+        "land in the snapshot (default: 0 = off, heap suspends target)",
+    )
 
     # Diff command — compare two ledger-close snapshots from events.jsonl
     diff_parser = subparsers.add_parser(
@@ -504,6 +537,60 @@ def run():
         "--json",
         action="store_true",
         help="Emit JSON to stdout instead of a rich table",
+    )
+    heap_parser.add_argument(
+        "--binary",
+        type=str,
+        default=None,
+        help="Only include rows whose binary matches (substring, e.g. 'xrpld')",
+    )
+    heap_parser.add_argument(
+        "--grep",
+        type=str,
+        default=None,
+        help="Only include rows whose class matches this regex (e.g. SHAMap)",
+    )
+
+    # heap-trend — walk events.jsonl, aggregate per-class growth + monotonic flag
+    trend_parser = subparsers.add_parser(
+        "heap-trend",
+        help="Per-class heap growth across all heap samples in a session",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    trend_parser.add_argument(
+        "--dir",
+        type=Path,
+        default=None,
+        help="Session dir (defaults to the currently-running rippled's dir)",
+    )
+    trend_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="memory_monitor_results",
+        help="Root containing session dirs (default: memory_monitor_results)",
+    )
+    trend_parser.add_argument(
+        "--top",
+        type=int,
+        default=50,
+        help="Top N rows to show, sorted by Δbytes desc (default: 50)",
+    )
+    trend_parser.add_argument(
+        "--monotonic",
+        action="store_true",
+        help="Show only classes that never decreased across samples",
+    )
+    trend_parser.add_argument(
+        "--binary",
+        type=str,
+        default=None,
+        help="Only aggregate rows whose binary matches (substring)",
+    )
+    trend_parser.add_argument(
+        "--grep",
+        type=str,
+        default=None,
+        help="Only aggregate rows whose class matches this regex",
     )
 
     # Summary command — one-screen triage view of a session dir
@@ -609,6 +696,10 @@ def run():
         run_heap(args)
         return
 
+    if args.command == "heap-trend":
+        run_heap_trend(args)
+        return
+
     # Handle monitor command
     if hasattr(args, "list") and args.list:
         list_binaries(args.build_dir)
@@ -650,6 +741,7 @@ def run():
         use_vmmap=not args.no_vmmap,
         breakdown_interval_seconds=args.breakdown_interval,
         fresh_session=args.fresh,
+        heap_every_ledger=args.heap_every_ledger,
     )
 
     # Configure DI container
