@@ -85,8 +85,9 @@ class StatusBar(Static):
         else:
             self.memory_text = "Memory: N/A"
 
-        # Update ledgers (combined format)
-        prefix = f"[{state.server_state}] " if state.server_state else ""
+        # Update ledgers (combined format). The brackets are escaped so
+        # Rich doesn't try to parse '[syncing]' as a style tag and drop it.
+        prefix = f"\\[{state.server_state}] " if state.server_state else ""
         age_suffix = ""
         if state.validated_age_s is not None:
             age_suffix = f" ({state.validated_age_s}s old)"
