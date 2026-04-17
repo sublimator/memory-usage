@@ -573,7 +573,9 @@ class MemoryMonitorDashboard(App):
                 self.counts_display_stats.update_counts(counts)
 
         # Latest values -> state, then a single notify so other widgets paint
-        # once from the tail of the history.
+        # once from the tail of the history. Everything the status bar and
+        # side panels read from ApplicationState is repopulated here so
+        # reattach is visually indistinguishable from "never left".
         latest = snapshots[-1]
         state = self.state_manager.state
         if latest.get("counts"):
@@ -582,6 +584,8 @@ class MemoryMonitorDashboard(App):
             state.job_types = latest["job_types"]
         if latest.get("memory_breakdown"):
             state.memory_breakdown = latest["memory_breakdown"]
+        if latest.get("catalogue_status"):
+            state.catalogue_status = latest["catalogue_status"]
         if latest.get("complete_ledgers"):
             state.complete_ledgers = latest["complete_ledgers"]
             state.ledger_count = latest.get("ledger_count", 0) or 0
@@ -590,6 +594,22 @@ class MemoryMonitorDashboard(App):
             state.current_memory_mb = float(rss_mb)
             state.current_memory_percent = float(latest.get("memory_percent", 0) or 0)
             state.num_threads = int(latest.get("num_threads", 0) or 0)
+
+        # server_info-derived diagnostics — status bar shows these in the
+        # [state] prefix, uptime, and ledger-age suffix. Without this block
+        # those go blank for ~2-3s after reattach until the next RPC.
+        for field in (
+            "sync_start_ledger",
+            "server_state",
+            "validated_age_s",
+            "closed_ledger_seq",
+            "closed_ledger_age_s",
+            "rippled_uptime_s",
+        ):
+            val = latest.get(field)
+            if val is not None:
+                setattr(state, field, val)
+
         await self.state_manager._notify_observers()
 
         self.monitor_log.queue_message(

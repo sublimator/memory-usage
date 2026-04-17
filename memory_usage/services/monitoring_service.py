@@ -702,15 +702,29 @@ class MonitoringService:
 
         # If this (pid, create_time) has been seen before, replay prior
         # events into the UI before the new session writes more.
-        if store.exists() and self._hydrate_callback is not None:
+        if store.exists():
             try:
                 events = list(store.iter_events())
                 meta = store.load_meta() or {}
                 if events:
-                    self.logger.info(
-                        f"Hydrating UI from {len(events)} prior event(s) in {store.dir}"
-                    )
-                    await self._hydrate_callback(events, meta)
+                    # Service-side counters: restore from the latest snapshot
+                    # so cumulative_transactions keeps counting across
+                    # reattaches (otherwise _initialize_binary_result's zero
+                    # would appear in the next snapshot as a regression).
+                    last_snapshot: Optional[Dict[str, Any]] = None
+                    for ev in events:
+                        if ev.get("event") == "snapshot":
+                            last_snapshot = ev
+                    if last_snapshot is not None:
+                        cum = last_snapshot.get("cumulative_transactions")
+                        if isinstance(cum, (int, float)):
+                            self.total_txns = int(cum)
+
+                    if self._hydrate_callback is not None:
+                        self.logger.info(
+                            f"Hydrating UI from {len(events)} prior event(s) in {store.dir}"
+                        )
+                        await self._hydrate_callback(events, meta)
             except Exception as e:
                 self.logger.warning(f"Hydration skipped: {e}")
 
@@ -880,6 +894,10 @@ class MonitoringService:
         # Calculate ledger count
         ledger_count = parse_ledger_ranges(self.complete_ledgers)
 
+        # Snapshot carries the full set of values needed to repaint the
+        # dashboard on reattach — anything shown in the status bar / side
+        # panels that otherwise lives only in ApplicationState.
+        s = self.state_manager.state
         snapshot = MemorySnapshot(
             timestamp=datetime.now().isoformat(),
             elapsed_seconds=elapsed,
@@ -894,10 +912,16 @@ class MonitoringService:
             num_threads=memory_stats.get("num_threads", 0),
             complete_ledgers=self.complete_ledgers,
             ledger_count=ledger_count,
-            # Include diagnostic data if available
             counts=self.latest_counts,
             job_types=self.latest_job_types,
             memory_breakdown=breakdown_dict,
+            catalogue_status=self.latest_catalogue_status,
+            sync_start_ledger=s.sync_start_ledger,
+            server_state=s.server_state,
+            validated_age_s=s.validated_age_s,
+            closed_ledger_seq=s.closed_ledger_seq,
+            closed_ledger_age_s=s.closed_ledger_age_s,
+            rippled_uptime_s=s.rippled_uptime_s,
         )
 
         # Persist to events.jsonl — crash-resilient source of truth. The

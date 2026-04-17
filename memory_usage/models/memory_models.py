@@ -31,6 +31,17 @@ class MemorySnapshot(BaseModel):
     job_types: Optional[List[Dict[str, Any]]] = None  # server_info job_types
     # Per-VMA RSS breakdown (Linux only; None elsewhere)
     memory_breakdown: Optional[Dict[str, Any]] = None
+    catalogue_status: Optional[Dict[str, Any]] = None  # Xahau-only
+
+    # Fields folded in from server_info so the dashboard can repaint the
+    # status bar immediately on reattach — otherwise they stay blank until
+    # the next periodic RPC fires (~2-3s).
+    sync_start_ledger: Optional[int] = None
+    server_state: Optional[str] = None  # "syncing", "full", "disconnected", ...
+    validated_age_s: Optional[int] = None
+    closed_ledger_seq: Optional[int] = None
+    closed_ledger_age_s: Optional[int] = None
+    rippled_uptime_s: Optional[int] = None
 
 
 class SystemInfo(BaseModel):
