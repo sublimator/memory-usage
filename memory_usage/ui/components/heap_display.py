@@ -84,9 +84,16 @@ class HeapDisplay(VerticalScroll):
         total_mb = (sample.get("total_bytes") or 0) / (1024 * 1024)
         row_count = sample.get("row_count") or 0
         duration_ms = sample.get("duration_ms") or 0
+        lines_scanned = sample.get("lines_scanned") or 0
+        lines_matched = sample.get("lines_matched") or 0
+        unmatched = sample.get("unmatched_numeric") or 0
         header = (
-            f"pid {pid}  mode={mode}  {row_count:,} classes  {total_mb:,.1f} MB  ({duration_ms} ms)"
+            f"pid {pid}  mode={mode}  {row_count:,} classes  "
+            f"{total_mb:,.1f} MB  ({duration_ms} ms)  "
+            f"matched {lines_matched}/{lines_scanned}"
         )
+        if unmatched:
+            header += f"  [yellow]{unmatched} numeric skipped[/yellow]"
         if mode == "alloc-site":
             header += "  [yellow]MallocStackLogging active[/yellow]"
 

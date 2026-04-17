@@ -31,15 +31,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Two flavors of heap(1) rows:
+# Three flavors of heap(1) rows we accept:
 #   count  bytes  avg  class_name  C|O  binary       ← typed row
-#   count  bytes  avg  non-object                    ← typeless (raw malloc)
-# We accept both by making the C|O + binary optional and tagging the
-# typeless case with type="N" (non-object). Non-object is often where
-# the interesting growth hides in class view, so we keep it in the list
-# and let downstream commands decide whether to surface it.
-_ROW_RE_TYPED = re.compile(r"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(.+?)\s+([CO])\s+(\S+)\s*$")
-_ROW_RE_BARE = re.compile(r"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(.+?)\s*$")
+#   count  bytes  avg  class_name  C|O               ← typed row, no binary
+#   count  bytes  avg  class_name                    ← typeless (raw malloc, non-object)
+# heap sometimes prints thousand-separator commas in the byte column — the
+# _num helper strips them before int(). Typeless rows are tagged with
+# type="N" so downstream commands can include/exclude them explicitly.
+_ROW_RE_TYPED_BIN = re.compile(r"^\s*([\d,]+)\s+([\d,]+)\s+([\d.,]+)\s+(.+?)\s+([CO])\s+(\S+)\s*$")
+_ROW_RE_TYPED_NOBIN = re.compile(r"^\s*([\d,]+)\s+([\d,]+)\s+([\d.,]+)\s+(.+?)\s+([CO])\s*$")
+_ROW_RE_BARE = re.compile(r"^\s*([\d,]+)\s+([\d,]+)\s+([\d.,]+)\s+(.+?)\s*$")
+
+
+def _num(s: str) -> float:
+    return float(s.replace(",", ""))
 
 
 def is_supported() -> bool:
@@ -51,6 +56,7 @@ def take_heap_sample(
     pid: int,
     top_n: int = 50,
     timeout_s: float = 30.0,
+    raw_output_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Run ``heap`` for ``pid`` and return a parsed sample dict.
 
@@ -138,7 +144,21 @@ def take_heap_sample(
             "top": [],
         }
 
-    rows = _parse_heap_output(proc.stdout)
+    # Stash raw stdout alongside the structured sample if the caller
+    # gave us a path. This is the durable evidence when something looks
+    # off downstream — the parser can lose ground against new heap(1)
+    # formats and there's no second chance to re-run once the process
+    # has moved on.
+    raw_path_str: Optional[str] = None
+    if raw_output_path is not None:
+        try:
+            raw_output_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_output_path.write_text(proc.stdout, encoding="utf-8")
+            raw_path_str = str(raw_output_path)
+        except OSError:
+            raw_path_str = None
+
+    rows, diag = _parse_heap_output(proc.stdout)
     total_bytes = sum(r["bytes"] for r in rows)
     rows.sort(key=lambda r: r["bytes"], reverse=True)
     top = rows[:top_n]
@@ -155,6 +175,10 @@ def take_heap_sample(
         "row_count": len(rows),
         "top": top,
         "mode": detect_mode(top),
+        "raw_path": raw_path_str,
+        "lines_scanned": diag["lines_scanned"],
+        "lines_matched": diag["lines_matched"],
+        "unmatched_numeric": diag["unmatched_numeric"],
     }
 
 
@@ -207,40 +231,68 @@ def filter_sample(
     return {**sample, "top": rows, "filtered": bool(binary or grep)}
 
 
-def _parse_heap_output(stdout: str) -> List[Dict[str, Any]]:
-    """Pull data rows out of ``heap``'s mixed-format text output.
+def _parse_heap_output(stdout: str) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Parse heap(1) output into (rows, diag) where ``diag`` carries stats.
 
-    The tool prints a preamble (process name, zones summary, etc) followed
-    by one or more class-histogram tables. We don't try to segment by
-    zone — every ``count bytes avg class C/O binary`` line is treated as
-    a datapoint and deduplicated on ``(class, binary)``. Rows that don't
-    match the regex are silently skipped.
+    Returns every ``count bytes avg class [C|O] [binary]`` line as a row,
+    deduplicating on (class, binary, type). Rows that don't match any of
+    the three accepted shapes are counted in ``diag.unmatched`` so a
+    surprisingly-small top-N on a fat process can be debugged via the
+    raw output file we stash alongside.
     """
     by_key: Dict[tuple, Dict[str, Any]] = {}
     # Rows that summarise the whole sample rather than a bucket — skip them
     # so they don't dominate the top-K like an uncategorised giant class.
     summary_labels = {"total", "all zones", "process"}
+    diag = {"lines_scanned": 0, "lines_matched": 0, "unmatched_numeric": 0}
     for line in stdout.splitlines():
-        typed = _ROW_RE_TYPED.match(line)
-        if typed:
-            count = int(typed.group(1))
-            byt = int(typed.group(2))
-            avg = float(typed.group(3))
-            cls = typed.group(4).strip()
-            typ = typed.group(5)
-            binary = typed.group(6)
+        if not line.strip():
+            continue
+        diag["lines_scanned"] += 1
+        cls = binary = ""
+        typ = ""
+        count = byt = 0
+        avg = 0.0
+        matched = False
+        m = _ROW_RE_TYPED_BIN.match(line)
+        if m:
+            count = int(_num(m.group(1)))
+            byt = int(_num(m.group(2)))
+            avg = _num(m.group(3))
+            cls = m.group(4).strip()
+            typ = m.group(5)
+            binary = m.group(6)
+            matched = True
         else:
-            bare = _ROW_RE_BARE.match(line)
-            if not bare:
-                continue
-            count = int(bare.group(1))
-            byt = int(bare.group(2))
-            avg = float(bare.group(3))
-            cls = bare.group(4).strip()
-            typ = "N"  # non-object (typeless) — raw malloc, no C++/ObjC typeinfo
-            binary = ""
-            if cls.lower() in summary_labels or cls.lower().startswith("all "):
-                continue
+            m2 = _ROW_RE_TYPED_NOBIN.match(line)
+            if m2:
+                count = int(_num(m2.group(1)))
+                byt = int(_num(m2.group(2)))
+                avg = _num(m2.group(3))
+                cls = m2.group(4).strip()
+                typ = m2.group(5)
+                binary = ""
+                matched = True
+            else:
+                m3 = _ROW_RE_BARE.match(line)
+                if m3:
+                    count = int(_num(m3.group(1)))
+                    byt = int(_num(m3.group(2)))
+                    avg = _num(m3.group(3))
+                    cls = m3.group(4).strip()
+                    typ = "N"  # non-object (typeless) — raw malloc
+                    binary = ""
+                    if cls.lower() in summary_labels or cls.lower().startswith("all "):
+                        continue
+                    matched = True
+                elif line.lstrip()[:1].isdigit():
+                    # Looked data-ish (starts with a digit) but didn't
+                    # match any shape — count it so users can spot parser
+                    # drift against a new heap(1) version.
+                    diag["unmatched_numeric"] += 1
+        if not matched:
+            continue
+        diag["lines_matched"] += 1
         key = (cls, binary, typ)
         existing = by_key.get(key)
         if existing is None:
@@ -257,7 +309,7 @@ def _parse_heap_output(stdout: str) -> List[Dict[str, Any]]:
             existing["count"] += count
             existing["bytes"] += byt
             existing["avg"] = existing["bytes"] / existing["count"] if existing["count"] else 0.0
-    return list(by_key.values())
+    return list(by_key.values()), diag
 
 
 def render_heap_sample(sample: Dict[str, Any], top_n: Optional[int] = None) -> None:

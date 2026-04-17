@@ -684,20 +684,33 @@ class MonitoringService:
             return
         self._heap_sampling_in_flight = True
         pid = proc.pid
-        asyncio.create_task(self._run_heap_sample(pid))
+        # Stash raw heap(1) output next to events.jsonl so heap-trend can
+        # re-parse or diff arbitrary samples without re-invoking heap on
+        # a target that's long since moved on. Keyed by ledger because
+        # that's how the downstream analysis rolls up.
+        raw_path: Optional[Path] = None
+        if self.session_store is not None:
+            raw_path = self.session_store.dir / "heap_samples" / f"{ledger_index}.txt"
+        asyncio.create_task(self._run_heap_sample(pid, raw_path))
 
-    async def _run_heap_sample(self, pid: int) -> None:
+    async def _run_heap_sample(self, pid: int, raw_path: Optional[Path]) -> None:
         """Run heap(1) off the event loop; publish result to state."""
         try:
-            sample = await asyncio.to_thread(take_heap_sample, pid, 50)
+            sample = await asyncio.to_thread(take_heap_sample, pid, 50, 30.0, raw_path)
             if sample.get("ok"):
                 self.latest_heap_sample = sample
                 self.state_manager.state.heap_sample = sample
                 await self.state_manager._notify_observers()
                 total_mb = (sample.get("total_bytes") or 0) / (1024 * 1024)
+                lines_scanned = sample.get("lines_scanned") or 0
+                lines_matched = sample.get("lines_matched") or 0
+                unmatched = sample.get("unmatched_numeric") or 0
+                extra = ""
+                if unmatched > 0:
+                    extra = f" [warn: {unmatched} numeric lines didn't match parser]"
                 self.logger.info(
-                    f"heap: {sample.get('row_count'):,} classes, "
-                    f"{total_mb:,.1f} MB total ({sample.get('duration_ms')} ms)"
+                    f"heap: {sample.get('row_count'):,} classes, {total_mb:,.1f} MB "
+                    f"({sample.get('duration_ms')} ms, matched {lines_matched}/{lines_scanned}){extra}"
                 )
             else:
                 self.logger.warning(f"heap sample failed: {sample.get('error')}")
