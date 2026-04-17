@@ -104,8 +104,11 @@ class MemoryMonitorDashboard(App):
         text-style: italic;
     }
 
+    /* 1fr (not 100%) so main-container shares space with the memory
+       graph below it inside the Overview TabPane. dock: bottom stopped
+       working cleanly once these two siblings were inside a pane. */
     #main-container {
-        height: 100%;
+        height: 1fr;
         width: 100%;
         layout: horizontal;
     }
@@ -203,8 +206,9 @@ class MemoryMonitorDashboard(App):
         height: 1fr;
     }
 
+    /* Fixed 17-row height so it sits at the bottom of the Overview pane
+       without docking (which interacted poorly with TabPane). */
     #memory-graph {
-        dock: bottom;
         height: 17;
         background: $panel;
         border: solid $primary;
