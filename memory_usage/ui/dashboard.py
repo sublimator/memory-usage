@@ -156,6 +156,9 @@ class MemoryMonitorDashboard(App):
         border: solid $secondary;
         padding: 1;
         background: $surface;
+        /* Hidden by default — only relevant on Xahau builds with
+           catalogue loading active. Press 'g' to toggle. */
+        display: none;
     }
 
     MemoryBreakdownDisplay {
@@ -318,6 +321,7 @@ class MemoryMonitorDashboard(App):
         Binding("c", "clear", "Clear logs"),
         Binding("space", "pause", "Pause/Resume"),
         Binding("s", "stop_process", "Stop rippled"),
+        Binding("g", "toggle_catalogue", "Catalogue"),
     ]
 
     @inject
@@ -607,6 +611,17 @@ class MemoryMonitorDashboard(App):
             self.monitor_log.queue_message("Stopping rippled process...", "yellow")
             await self.monitoring_service.stop_monitoring()
             await self.state_manager.update_status("Stopped by user")
+
+    def action_toggle_catalogue(self) -> None:
+        """Show/hide the Xahau catalogue status panel across both tabs.
+
+        Hidden by default because it only produces useful output on Xahau
+        builds that are actively loading a catalogue; on stock rippled and
+        on a synced Xahau node it's just 'No catalogue data available'.
+        """
+        new_display = not self.catalogue_display.display
+        self.catalogue_display.display = new_display
+        self.catalogue_display_stats.display = new_display
 
     async def action_quit(self) -> None:
         """Quit the application with proper cleanup.

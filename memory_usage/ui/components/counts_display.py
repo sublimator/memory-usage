@@ -110,7 +110,9 @@ class CountsDisplay(VerticalScroll):
         table.add_column("Min", justify="right", style="dim", ratio=1)
         table.add_column("Cur", justify="right", style="green", ratio=1)
         table.add_column("Max", justify="right", style="dim", ratio=1)
-        table.add_column("Trend", justify="center", width=3, no_wrap=True)
+        # width=5 so the header 'Trend' fits without ellipsis; contents are
+        # the single ↑↓→ arrow centred in that field.
+        table.add_column("Trend", justify="center", width=5, no_wrap=True)
 
         # Group related metrics
         sections = {
