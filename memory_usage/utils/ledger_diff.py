@@ -71,15 +71,16 @@ def load_ledger_snapshots(
     events_path: Path,
     from_ledger: int,
     to_ledger: int,
-) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    """Scan events.jsonl, return the two snapshot events by ledger_index.
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[int]]:
+    """Scan events.jsonl, return (from_snapshot, to_snapshot, first_ledger).
 
-    Returns (from_snapshot, to_snapshot). Either can be None if the
-    ledger wasn't captured (e.g. requested before the session started or
-    after it ended).
+    ``first_ledger`` is the ledger_index of the earliest snapshot we saw —
+    useful context for the diff header (how deep into the session are we?).
+    Either snapshot can be None if the ledger wasn't captured.
     """
     from_snap: Optional[Dict[str, Any]] = None
     to_snap: Optional[Dict[str, Any]] = None
+    first_ledger: Optional[int] = None
     with open(events_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -92,17 +93,62 @@ def load_ledger_snapshots(
             if ev.get("event") != "snapshot":
                 continue
             idx = ev.get("ledger_index")
+            if idx is None:
+                continue
+            if first_ledger is None:
+                first_ledger = idx
             if idx == from_ledger:
                 from_snap = ev
             elif idx == to_ledger:
                 to_snap = ev
-                if from_snap is not None:
-                    break  # got both, stop scanning
-    return from_snap, to_snap
+    return from_snap, to_snap, first_ledger
+
+
+def _fmt_uptime(seconds: Optional[int]) -> str:
+    """Short human-readable uptime: 4478 -> '1h14m', 58 -> '58s'."""
+    if seconds is None:
+        return "?"
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    if h < 24:
+        return f"{h}h{m:02d}m"
+    d, h = divmod(h, 24)
+    return f"{d}d{h:02d}h"
+
+
+def _derived(snapshot: Dict[str, Any], name: str) -> Optional[float]:
+    """Computed fields — not in the raw event, derived from others.
+
+    ``heap_mb`` = rss_mb minus nodestore mmap minus other file-backed mmap.
+    Isolates the part of RSS that's actually heap allocations, which is what
+    you want to track when hunting leaks separately from nodestore paging.
+    """
+    if name == "heap_mb":
+        rss = snapshot.get("rss_mb")
+        if not isinstance(rss, (int, float)):
+            return None
+        bd = snapshot.get("memory_breakdown") or {}
+        nodestore = bd.get("nodestore_mb") if isinstance(bd, dict) else None
+        other = bd.get("other_file_mb") if isinstance(bd, dict) else None
+        paged = 0.0
+        if isinstance(nodestore, (int, float)):
+            paged += float(nodestore)
+        if isinstance(other, (int, float)):
+            paged += float(other)
+        return float(rss) - paged
+    return None
 
 
 def _lookup(snapshot: Dict[str, Any], field_path: str) -> Optional[float]:
-    """Dotted-path lookup for a numeric value. Returns None if missing or not numeric."""
+    """Dotted-path lookup for a numeric value, with derived-field fallback."""
+    derived = _derived(snapshot, field_path)
+    if derived is not None:
+        return derived
     cur: Any = snapshot
     for part in field_path.split("."):
         if not isinstance(cur, dict) or part not in cur:
@@ -249,6 +295,7 @@ def render_diff(
     from_snap: Dict[str, Any],
     to_snap: Dict[str, Any],
     console: Optional[Console] = None,
+    first_ledger: Optional[int] = None,
 ) -> None:
     console = console or Console()
 
@@ -262,6 +309,8 @@ def render_diff(
     t_from = _parse_ts(from_snap.get("t") or from_snap.get("timestamp"))
     t_to = _parse_ts(to_snap.get("t") or to_snap.get("timestamp"))
     wall_s = (t_to - t_from).total_seconds() if (t_from and t_to) else None
+    up_from = from_snap.get("rippled_uptime_s")
+    up_to = to_snap.get("rippled_uptime_s")
 
     header_parts = [f"[bold cyan]Ledger {from_idx:,} → {to_idx:,}[/bold cyan]"]
     if ledgers_span is not None:
@@ -272,6 +321,22 @@ def render_diff(
         if wall_s > 0:
             header_parts.append(f"[dim]{txn_delta / wall_s:.1f} tps[/dim]")
     console.print(" | ".join(header_parts))
+
+    # Second line: process uptime at each end + session-start context.
+    # Puts the two ledgers in absolute timeline terms — "was the +15 MB
+    # jump in the first 2 min of uptime or after 6 hours?" is often the
+    # question that matters.
+    context_parts: List[str] = []
+    if up_from is not None or up_to is not None:
+        context_parts.append(f"[dim]uptime[/dim] {_fmt_uptime(up_from)} → {_fmt_uptime(up_to)}")
+    if first_ledger is not None and from_idx is not None:
+        ledgers_into = from_idx - first_ledger
+        context_parts.append(
+            f"[dim]session first ledger[/dim] {first_ledger:,} "
+            f"[dim]({ledgers_into:,} before FROM)[/dim]"
+        )
+    if context_parts:
+        console.print(" | ".join(context_parts))
     console.print()
 
     # --- memory ------------------------------------------------------------
@@ -302,6 +367,54 @@ def render_diff(
             else f"[{style}]{delta:+}[/{style}]",
         )
     console.print(mem_table)
+
+    # --- pool totals (pinned) ----------------------------------------------
+    # tagged_pointer_pools._total dominates real memory movement on
+    # patched-rippled builds but doesn't stand out in the general counts
+    # table because the other ~hundreds of counters drown it out. Pin it
+    # up here so the biggest driver is always on screen first.
+    pool_a = (from_snap.get("counts") or {}).get("tagged_pointer_pools", {}).get("_total", {})
+    pool_b = (to_snap.get("counts") or {}).get("tagged_pointer_pools", {}).get("_total", {})
+    if isinstance(pool_a, dict) and isinstance(pool_b, dict) and pool_a and pool_b:
+        pool_fields = [
+            ("current_bytes", "Current", "bytes"),
+            ("peak_bytes", "Peak", "bytes"),
+            ("cached_wasted_bytes", "Cached (wasted)", "bytes"),
+            ("cumulative_allocs", "Lifetime allocs", ""),
+        ]
+        any_delta = False
+        pool_table = Table(
+            title="SHAMap pool totals",
+            title_style="bold",
+            header_style="bold cyan",
+            box=None,
+        )
+        pool_table.add_column("Metric", style="yellow")
+        pool_table.add_column("From", justify="right", style="dim")
+        pool_table.add_column("To", justify="right", style="green")
+        pool_table.add_column("Δ", justify="right")
+        for key, label, unit in pool_fields:
+            a = pool_a.get(key)
+            b = pool_b.get(key)
+            if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+                continue
+            delta = b - a
+            if delta != 0:
+                any_delta = True
+            style = "red" if delta > 0 else ("green" if delta < 0 else "dim")
+            # Render bytes as MB when appropriate for readability.
+            if unit == "bytes" and (a >= 1 << 20 or b >= 1 << 20):
+                fmt_a = f"{a / (1024 * 1024):,.1f} MB"
+                fmt_b = f"{b / (1024 * 1024):,.1f} MB"
+                fmt_d = f"{delta / (1024 * 1024):+,.1f} MB"
+            else:
+                fmt_a = f"{a:,.0f}"
+                fmt_b = f"{b:,.0f}"
+                fmt_d = f"{delta:+,.0f}"
+            pool_table.add_row(label, fmt_a, fmt_b, f"[{style}]{fmt_d}[/{style}]")
+        if any_delta:
+            console.print()
+            console.print(pool_table)
 
     # --- memory breakdown (if both have it) --------------------------------
     bd_a = from_snap.get("memory_breakdown") or {}

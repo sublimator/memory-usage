@@ -91,7 +91,9 @@ def run_diff(args):
         sys.exit(2)
     assert dir_path is not None
     events_path = dir_path / "events.jsonl"
-    from_snap, to_snap = load_ledger_snapshots(events_path, args.from_ledger, args.to_ledger)
+    from_snap, to_snap, first_ledger = load_ledger_snapshots(
+        events_path, args.from_ledger, args.to_ledger
+    )
     if from_snap is None:
         print(
             f"error: no snapshot with ledger_index={args.from_ledger} in {events_path}",
@@ -104,7 +106,7 @@ def run_diff(args):
             file=sys.stderr,
         )
         sys.exit(1)
-    render_diff(from_snap, to_snap)
+    render_diff(from_snap, to_snap, first_ledger=first_ledger)
 
 
 def run_find(args):
@@ -443,7 +445,8 @@ def run():
     find_parser.add_argument(
         "field",
         type=str,
-        help="Dotted field path in a snapshot (e.g. rss_mb, counts.AL_size)",
+        help="Dotted path (rss_mb, counts.AL_size, memory_breakdown.anonymous_mb) "
+        "or derived (heap_mb = rss minus mmap'd nodestore + other files)",
     )
     find_parser.add_argument(
         "op",
