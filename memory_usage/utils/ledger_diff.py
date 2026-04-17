@@ -128,6 +128,26 @@ _POOL_SHORTCUTS = {
 }
 
 
+def _coerce_float(v: Any) -> Optional[float]:
+    """Best-effort numeric coercion.
+
+    rippled's get_counts emits many integer fields as strings ("228464") to
+    preserve precision across the JSON-number boundary. Without this, a
+    naive isinstance(..., (int, float)) check would drop every one of
+    them and `find` would silently return zero matches.
+    """
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v)
+        except ValueError:
+            return None
+    return None
+
+
 def _derived(snapshot: Dict[str, Any], name: str) -> Optional[float]:
     """Computed fields — not in the raw event, derived from others.
 
@@ -140,32 +160,31 @@ def _derived(snapshot: Dict[str, Any], name: str) -> Optional[float]:
       patched-rippled builds and the dotted path is painful to type.
     """
     if name == "heap_mb":
-        rss = snapshot.get("rss_mb")
-        if not isinstance(rss, (int, float)):
+        rss = _coerce_float(snapshot.get("rss_mb"))
+        if rss is None:
             return None
         bd = snapshot.get("memory_breakdown") or {}
-        nodestore = bd.get("nodestore_mb") if isinstance(bd, dict) else None
-        other = bd.get("other_file_mb") if isinstance(bd, dict) else None
-        paged = 0.0
-        if isinstance(nodestore, (int, float)):
-            paged += float(nodestore)
-        if isinstance(other, (int, float)):
-            paged += float(other)
-        return float(rss) - paged
+        nodestore = _coerce_float(bd.get("nodestore_mb") if isinstance(bd, dict) else None)
+        other = _coerce_float(bd.get("other_file_mb") if isinstance(bd, dict) else None)
+        return rss - (nodestore or 0.0) - (other or 0.0)
 
     if name in _POOL_SHORTCUTS:
         pool = (snapshot.get("counts") or {}).get("tagged_pointer_pools", {}).get("_total", {})
         if not isinstance(pool, dict):
             return None
-        raw = pool.get(_POOL_SHORTCUTS[name])
-        if not isinstance(raw, (int, float)):
+        raw = _coerce_float(pool.get(_POOL_SHORTCUTS[name]))
+        if raw is None:
             return None
-        return float(raw) / (1024 * 1024)
+        return raw / (1024 * 1024)
     return None
 
 
 def _lookup(snapshot: Dict[str, Any], field_path: str) -> Optional[float]:
-    """Dotted-path lookup for a numeric value, with derived-field fallback."""
+    """Dotted-path lookup for a numeric value, with derived-field fallback.
+
+    Strings that parse as numbers are accepted — rippled's get_counts
+    response stringifies many integer fields.
+    """
     derived = _derived(snapshot, field_path)
     if derived is not None:
         return derived
@@ -174,11 +193,7 @@ def _lookup(snapshot: Dict[str, Any], field_path: str) -> Optional[float]:
         if not isinstance(cur, dict) or part not in cur:
             return None
         cur = cur[part]
-    if isinstance(cur, bool):
-        return None
-    if isinstance(cur, (int, float)):
-        return float(cur)
-    return None
+    return _coerce_float(cur)
 
 
 _OPS = {
@@ -294,12 +309,18 @@ def render_find_results(
 
 
 def _flatten_numeric(prefix: str, d: Any, out: Dict[str, float]) -> None:
-    """Walk a dict, recording numeric leaves keyed by dotted path."""
+    """Walk a dict, recording numeric leaves keyed by dotted path.
+
+    Stringified numbers (``"12345"``) are coerced — rippled's get_counts
+    returns many int fields as strings to keep JSON precision.
+    """
     if isinstance(d, dict):
         for k, v in d.items():
             _flatten_numeric(f"{prefix}.{k}" if prefix else str(k), v, out)
-    elif isinstance(d, (int, float)) and not isinstance(d, bool):
-        out[prefix] = float(d)
+    else:
+        coerced = _coerce_float(d)
+        if coerced is not None:
+            out[prefix] = coerced
 
 
 def _parse_ts(s: Optional[str]) -> Optional[datetime]:
@@ -414,9 +435,9 @@ def render_diff(
         pool_table.add_column("To", justify="right", style="green")
         pool_table.add_column("Δ", justify="right")
         for key, label, unit in pool_fields:
-            a = pool_a.get(key)
-            b = pool_b.get(key)
-            if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+            a = _coerce_float(pool_a.get(key))
+            b = _coerce_float(pool_b.get(key))
+            if a is None or b is None:
                 continue
             delta = b - a
             if delta != 0:
