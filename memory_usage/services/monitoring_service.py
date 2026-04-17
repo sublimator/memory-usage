@@ -8,7 +8,7 @@ import socket
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 import psutil
 
@@ -16,6 +16,7 @@ from ..models.memory_models import BinaryTestResult, MemorySnapshot, SystemInfo,
 from ..utils.formatters import format_duration, format_ledger_ranges
 from ..utils.memory_breakdown import MemoryBreakdown
 from ..utils.parsers import parse_ledger_ranges
+from ..utils.session_store import SessionStore
 
 # Type hints only - these are injected via DI
 if TYPE_CHECKING:
@@ -80,11 +81,30 @@ class MonitoringService:
         # ledger close). None until the first refresh task tick completes.
         self.latest_breakdown: Optional[MemoryBreakdown] = None
 
-        # Create output directory
-        Path(self.config.output_dir).mkdir(exist_ok=True)
-        self.test_output_dir: Path = Path(self.config.output_dir) / self.test_run_timestamp
-        self.test_output_dir.mkdir(exist_ok=True)
-        self.logger.info(f"Test results will be saved to: {self.test_output_dir}")
+        # Ensure the output root exists — per-binary session dirs are created
+        # lazily inside SessionStore when we know pid + create_time.
+        self.output_root: Path = Path(self.config.output_dir)
+        self.output_root.mkdir(exist_ok=True)
+        self.logger.info(f"Results root: {self.output_root}")
+
+        # SessionStore for the current binary (opened in _open_session, closed
+        # in _finalize_binary_result). None before/between binaries.
+        self.session_store: Optional[SessionStore] = None
+        self.session_n: int = 0
+        # Stats scoped to the current *session*, not the whole binary — a
+        # reattach starts fresh counts. Written into the meta.json session
+        # entry on finalize.
+        self._session_peak_rss_mb: float = 0.0
+        self._session_total_txns: int = 0
+        self._session_total_ledgers: int = 0
+
+        # Replay hook for UI hydration — Dashboard registers this at mount.
+        # Invoked once per session_open with (events, meta) so the UI can
+        # seed its memory graph / counts history and compute cumulative
+        # baselines (Total / Test time) before live updates resume.
+        self._hydrate_callback: Optional[
+            Callable[[List[Dict[str, Any]], Dict[str, Any]], Awaitable[None]]
+        ] = None
 
         # Initialize system info and test config (must be non-None for BinaryTestResult)
         self.system_info: SystemInfo = self._build_system_info()
@@ -92,6 +112,17 @@ class MonitoringService:
 
         # Register WebSocket message handler
         self.websocket_manager.add_message_handler(self._handle_websocket_message)
+
+    def set_hydrate_callback(
+        self,
+        callback: Callable[[List[Dict[str, Any]], Dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        """Register a UI hydration hook.
+
+        Called with ``(events, meta)`` when reattaching to an existing session
+        dir, before the new session's events start flowing.
+        """
+        self._hydrate_callback = callback
 
     async def start_monitoring(self, binaries: List[str]):
         """Start monitoring all binaries"""
@@ -161,6 +192,18 @@ class MonitoringService:
             process = await self.process_manager.attach_to_process(pid, name, binary_path)
             await self.state_manager.update_process_info(name, process.pid)
 
+            # Open (or reopen) the session dir keyed on (pid, create_time).
+            # Hydrate runs *before* we start writing new events so the replay
+            # only contains prior sessions' snapshots, not this attach's own.
+            create_time = self._get_process_create_time(pid)
+            await self._open_session(
+                binary_path=binary_path,
+                binary_name=name,
+                pid=pid,
+                create_time=create_time,
+                mode="attach",
+            )
+
             # Connect to WebSocket
             await self.websocket_manager.connect()
 
@@ -199,8 +242,7 @@ class MonitoringService:
         finally:
             tick_task.cancel()
             breakdown_task.cancel()
-            # Save results
-            self._save_binary_result()
+            self._close_session()
 
             # Cleanup (detach, don't stop)
             await self.process_manager.stop_current()
@@ -305,12 +347,16 @@ class MonitoringService:
         """
         try:
             while not self._shutdown_event.is_set() and self._test_start_time:
-                elapsed = (datetime.now() - self._test_start_time).total_seconds()
-                monitoring_elapsed = None
+                live_elapsed = (datetime.now() - self._test_start_time).total_seconds()
+                # Add the prior-sessions baseline so Total keeps counting
+                # across reattaches. Baseline is 0 until hydrated.
+                elapsed = self.state_manager.state.prior_elapsed_seconds + live_elapsed
+                monitoring_elapsed: Optional[float] = None
                 if self._monitoring_start_time:
+                    live_monitoring = (datetime.now() - self._monitoring_start_time).total_seconds()
                     monitoring_elapsed = (
-                        datetime.now() - self._monitoring_start_time
-                    ).total_seconds()
+                        self.state_manager.state.prior_monitoring_seconds + live_monitoring
+                    )
                 await self.state_manager.update_timing(elapsed, monitoring_elapsed)
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
@@ -328,6 +374,18 @@ class MonitoringService:
             # Start the process
             process = await self.process_manager.start_process(binary_path, binary_name)
             await self.state_manager.update_process_info(binary_name, process.pid)
+
+            # Open the session dir (pid is fresh, so this is a new dir unless
+            # the OS recycled the pid within the same second — vanishingly
+            # unlikely, but the create_time in the key makes it unambiguous).
+            create_time = self._get_process_create_time(process.pid) if process.pid else 0.0
+            await self._open_session(
+                binary_path=binary_path,
+                binary_name=binary_name,
+                pid=process.pid or 0,
+                create_time=create_time,
+                mode="spawn",
+            )
 
             # Connect to WebSocket
             await self.websocket_manager.connect()
@@ -352,8 +410,7 @@ class MonitoringService:
         finally:
             tick_task.cancel()
             breakdown_task.cancel()
-            # Save results
-            self._save_binary_result()
+            self._close_session()
 
             # Cleanup
             await self.process_manager.stop_current()
@@ -474,12 +531,15 @@ class MonitoringService:
                 f"Memory: {snapshot.rss_mb:.1f}MB ({snapshot.memory_percent:.1f}%) - Threads: {snapshot.num_threads}"
             )
 
-            # Update UI state
+            # Update UI state. Timing is owned by _tick_timer (which folds
+            # in the prior-sessions baseline), so don't call update_timing
+            # here — it would clobber the cumulative Total on a reattach.
             await self.state_manager.update_memory_stats(
                 snapshot.rss_mb, snapshot.memory_percent, snapshot.num_threads
             )
-            # During polling, sync_duration is the same as elapsed time
-            await self.state_manager.update_timing(poll_elapsed, None)
+            # Running sync_duration during polling — mirrors elapsed from
+            # this session's start. Safe because it's only ever shown while
+            # syncing; finalize writes the real value to meta.json.
             self.state_manager.state.sync_duration_seconds = poll_elapsed
             await self.state_manager._notify_observers()
 
@@ -550,21 +610,9 @@ class MonitoringService:
 
                 last_ledger_update = datetime.now()
 
-            # Update timing
-            elapsed = (
-                (datetime.now() - self._test_start_time).total_seconds()
-                if self._test_start_time
-                else 0
-            )
-            monitoring_elapsed = (
-                (datetime.now() - self._monitoring_start_time).total_seconds()
-                if self._monitoring_start_time
-                else 0
-            )
-            await self.state_manager.update_timing(elapsed, monitoring_elapsed)
-
-            # Note: ledger close events will trigger snapshots via _handle_websocket_message
-            # which will also update memory stats
+            # Timing updates come exclusively from _tick_timer (which applies
+            # the cumulative baseline). Ledger-close events still fire
+            # snapshots + memory stats via _handle_websocket_message.
 
             await asyncio.sleep(1)
 
@@ -604,6 +652,158 @@ class MonitoringService:
                 if isinstance(ledger_time, (int, float))
                 else None,
             )
+
+    @staticmethod
+    def _get_process_create_time(pid: int) -> float:
+        """psutil create_time (epoch seconds, subsecond precision).
+
+        Used as the second half of the session identifier. Returns 0.0 if we
+        can't read it — caller still gets a usable dir name, just without
+        the protection against pid-reuse collisions.
+        """
+        try:
+            return psutil.Process(pid).create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return 0.0
+
+    async def _open_session(
+        self,
+        binary_path: str,
+        binary_name: str,
+        pid: int,
+        create_time: float,
+        mode: str,
+    ) -> None:
+        """Resolve the session dir, hydrate prior events, write session_start.
+
+        ``mode`` is 'spawn' or 'attach'. Attach on an existing dir means
+        reattach — we replay all prior events through the hydrate callback
+        before appending anything new, so the dashboard boots with the full
+        history already on screen.
+        """
+        store = SessionStore(
+            output_root=self.output_root,
+            binary_name=binary_name,
+            pid=pid,
+            create_time=create_time,
+        )
+
+        # --fresh: shove the existing dir aside so hydration is skipped and
+        # a clean store is opened. The backup preserves the old JSONL in
+        # case the user wants it later.
+        if self.config.fresh_session and store.dir.exists():
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup = store.dir.with_name(f"{store.dir.name}.bak-{ts}")
+            try:
+                store.dir.rename(backup)
+                self.logger.info(f"--fresh: moved prior session dir to {backup}")
+            except OSError as e:
+                self.logger.warning(f"--fresh: could not move {store.dir}: {e}")
+
+        # If this (pid, create_time) has been seen before, replay prior
+        # events into the UI before the new session writes more.
+        if store.exists() and self._hydrate_callback is not None:
+            try:
+                events = list(store.iter_events())
+                meta = store.load_meta() or {}
+                if events:
+                    self.logger.info(
+                        f"Hydrating UI from {len(events)} prior event(s) in {store.dir}"
+                    )
+                    await self._hydrate_callback(events, meta)
+            except Exception as e:
+                self.logger.warning(f"Hydration skipped: {e}")
+
+        store.open_for_append()
+
+        # Initialize meta.json on first session; subsequent sessions just
+        # append their entry.
+        existing_meta = store.load_meta()
+        if existing_meta is None:
+            binary_size_mb = 0.0
+            try:
+                if Path(binary_path).exists():
+                    binary_size_mb = Path(binary_path).stat().st_size / (1024 * 1024)
+            except OSError:
+                pass
+            store.save_meta(
+                {
+                    "binary_name": binary_name,
+                    "binary_path": binary_path,
+                    "binary_size_mb": binary_size_mb,
+                    "pid": pid,
+                    "create_time": create_time,
+                    "first_seen": datetime.now().isoformat(),
+                    "system_info": self.system_info.model_dump(),
+                    "test_configuration": self.test_config.model_dump(),
+                    "sessions": [],
+                }
+            )
+
+        session_n = store.next_session_number()
+        session_entry: Dict[str, Any] = {
+            "n": session_n,
+            "mode": mode,
+            "start": datetime.now().isoformat(),
+            "end": None,
+            "status": "running",
+            "reason": None,
+            "peak_rss_mb": 0.0,
+            "total_transactions": 0,
+            "total_ledgers": 0,
+        }
+        store.append_session(session_entry)
+        store.write_session_start(session_n, mode)
+
+        self.session_store = store
+        self.session_n = session_n
+        self._session_peak_rss_mb = 0.0
+        self._session_total_txns = 0
+        self._session_total_ledgers = 0
+
+        self.logger.info(f"Session #{session_n} ({mode}) opened at {store.dir}")
+
+    def _close_session(self) -> None:
+        """Best-effort session_end + meta summary flush.
+
+        Intentionally does NOT compute or persist session durations: those
+        are derived from the events.jsonl timestamps at hydration time, so
+        they survive Ctrl+C / SIGKILL / monitor crash — anything that stops
+        us before this method runs. meta.json is a convenience cache; the
+        jsonl is the source of truth.
+        """
+        store = self.session_store
+        if store is None:
+            return
+        try:
+            status = self._current_result.status if self._current_result else "completed"
+            reason = self._current_result.error_message if self._current_result else None
+            if status == "running":
+                status = "interrupted"
+            store.write_session_end(self.session_n, status, reason)
+            store.update_session(
+                self.session_n,
+                {
+                    "end": datetime.now().isoformat(),
+                    "status": status,
+                    "reason": reason,
+                    "peak_rss_mb": self._session_peak_rss_mb,
+                    "total_transactions": self._session_total_txns,
+                    "total_ledgers": self._session_total_ledgers,
+                },
+            )
+            meta = store.load_meta() or {}
+            summary = meta.setdefault("summary", {})
+            prev_peak = summary.get("peak_rss_mb") or 0.0
+            summary["peak_rss_mb"] = max(float(prev_peak), self._session_peak_rss_mb)
+            if self._current_result and self._current_result.final_memory_rss_mb:
+                summary["final_rss_mb"] = self._current_result.final_memory_rss_mb
+            store.save_meta(meta)
+        except Exception as e:
+            self.logger.error(f"Error closing session: {e}")
+        finally:
+            store.close()
+            self.session_store = None
 
     def _initialize_binary_result(self, binary_path: str, binary_name: str):
         """Initialize result tracking for current binary"""
@@ -700,9 +900,20 @@ class MonitoringService:
             memory_breakdown=breakdown_dict,
         )
 
-        # Add to current result
-        if self._current_result:
-            self._current_result.snapshots.append(snapshot)
+        # Persist to events.jsonl — crash-resilient source of truth. The
+        # in-memory snapshot list was dropped; summaries still update below.
+        if self.session_store is not None:
+            try:
+                self.session_store.write_snapshot(snapshot.model_dump(mode="json"))
+            except Exception as e:
+                self.logger.error(f"Failed to write snapshot event: {e}")
+
+        # Track per-session peak/totals for the meta.json session entry.
+        self._session_peak_rss_mb = max(self._session_peak_rss_mb, snapshot.rss_mb)
+        if transaction_count:
+            self._session_total_txns += transaction_count
+        if ledger_index is not None:
+            self._session_total_ledgers += 1
 
         # Update peaks and compute deltas from last snapshot (used for log)
         rss_mb = snapshot.rss_mb
@@ -799,13 +1010,13 @@ class MonitoringService:
         if process and hasattr(process, "process") and process.process:
             self._current_result.exit_code = process.process.poll()
 
-        # Calculate memory statistics
-        if self._current_result.snapshots:
-            memory_values = [s.rss_mb for s in self._current_result.snapshots if s.rss_mb > 0]
-            if memory_values:
-                self._current_result.final_memory_rss_mb = memory_values[-1]
-                self._current_result.peak_memory_rss_mb = max(memory_values)
-                self._current_result.average_memory_rss_mb = sum(memory_values) / len(memory_values)
+        # Memory statistics come from in-flight tracking (the full time series
+        # is in events.jsonl, not in memory). final/peak are what we've seen
+        # this session; average isn't cheap without scanning JSONL, so skip.
+        if self._last_snapshot_rss_mb is not None:
+            self._current_result.final_memory_rss_mb = self._last_snapshot_rss_mb
+        if self._peak_rss_mb > 0:
+            self._current_result.peak_memory_rss_mb = self._peak_rss_mb
 
         # Total transactions and ledgers
         self._current_result.total_transactions = self.total_txns
@@ -835,20 +1046,6 @@ class MonitoringService:
             self.logger.info(f"  Peak memory: {self._current_result.peak_memory_rss_mb:.1f}MB")
         self.logger.info(f"  Total transactions: {self._current_result.total_transactions}")
         self.logger.info(f"  Total ledgers: {self._current_result.total_ledgers}")
-
-    def _save_binary_result(self):
-        """Save the binary test result to JSON"""
-        if not self._current_result:
-            return
-
-        output_file = self.test_output_dir / f"{self._current_result.binary_name}.json"
-
-        try:
-            with open(output_file, "w") as f:
-                f.write(self._current_result.model_dump_json(indent=2))
-            self.logger.info(f"Results saved to: {output_file}")
-        except Exception as e:
-            self.logger.error(f"Error saving results: {e}")
 
     def _build_system_info(self) -> SystemInfo:
         """Gather system information"""

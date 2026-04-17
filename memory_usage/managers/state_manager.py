@@ -37,10 +37,20 @@ class ApplicationState:
     is_synced: bool = False
     is_paused: bool = False
 
-    # Timing info
+    # Timing info. elapsed_seconds and monitoring_elapsed_seconds are
+    # *cumulative across all sessions* — tick_timer adds the live delta to
+    # the prior-sessions baseline below so the status bar's Total/Test
+    # clocks keep counting forward after a reattach.
     elapsed_seconds: float = 0.0
     monitoring_elapsed_seconds: Optional[float] = None
     sync_duration_seconds: Optional[float] = None  # Time taken to sync
+    # Baselines loaded from meta.json on reattach (sum of prior sessions).
+    prior_elapsed_seconds: float = 0.0
+    prior_monitoring_seconds: float = 0.0
+    # First session that actually synced — its sync_duration_seconds is the
+    # "real" sync time for the binary, since subsequent reattaches to an
+    # already-synced node would otherwise show ~0s.
+    original_sync_duration_seconds: Optional[float] = None
 
     # Server info data
     job_types: Optional[List[Dict[str, Any]]] = None
