@@ -18,6 +18,13 @@ from .utils import (
     get_process_by_pid,
     parse_rippled_config,
 )
+from .utils.ledger_diff import (
+    find_delta_matches,
+    load_ledger_snapshots,
+    render_diff,
+    render_find_results,
+    resolve_session_dir,
+)
 
 # Default Configuration
 DEFAULT_RIPPLED_CONFIG_PATH = "niq-conf/xahaud.cfg"
@@ -73,6 +80,49 @@ def tail_logs():
     except KeyboardInterrupt:
         print("\nStopped tailing log file")
         sys.exit(0)
+
+
+def run_diff(args):
+    """Diff two ledger-close snapshots from the resolved session dir."""
+    root = Path(args.output_dir)
+    dir_path, err = resolve_session_dir(root, args.dir)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        sys.exit(2)
+    assert dir_path is not None
+    events_path = dir_path / "events.jsonl"
+    from_snap, to_snap = load_ledger_snapshots(events_path, args.from_ledger, args.to_ledger)
+    if from_snap is None:
+        print(
+            f"error: no snapshot with ledger_index={args.from_ledger} in {events_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if to_snap is None:
+        print(
+            f"error: no snapshot with ledger_index={args.to_ledger} in {events_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    render_diff(from_snap, to_snap)
+
+
+def run_find(args):
+    """Scan consecutive ledger-close pairs for delta predicates."""
+    root = Path(args.output_dir)
+    dir_path, err = resolve_session_dir(root, args.dir)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        sys.exit(2)
+    assert dir_path is not None
+    events_path = dir_path / "events.jsonl"
+    try:
+        threshold = float(args.value)
+    except ValueError:
+        print(f"error: VALUE must be numeric, got {args.value!r}", file=sys.stderr)
+        sys.exit(2)
+    matches = find_delta_matches(events_path, args.field, args.op, threshold)
+    render_find_results(args.field, args.op, threshold, matches)
 
 
 def run_attach_mode(args):
@@ -355,6 +405,70 @@ def run():
         "— no reattach hydration.",
     )
 
+    # Diff command — compare two ledger-close snapshots from events.jsonl
+    diff_parser = subparsers.add_parser(
+        "diff",
+        help="Diff two ledger-close snapshots (memory + counts deltas)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    diff_parser.add_argument("from_ledger", type=int, help="Lower ledger index")
+    diff_parser.add_argument("to_ledger", type=int, help="Upper ledger index")
+    diff_parser.add_argument(
+        "--dir",
+        type=Path,
+        default=None,
+        help="Session dir (defaults to the currently-running rippled's dir, "
+        "if exactly one is running)",
+    )
+    diff_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="memory_monitor_results",
+        help="Root containing session dirs (default: memory_monitor_results)",
+    )
+
+    # Find command — scan consecutive ledger pairs for a delta predicate.
+    # Dotted field paths supported: counts.AL_size, memory_breakdown.anonymous_mb.
+    find_parser = subparsers.add_parser(
+        "find",
+        help="Find consecutive ledger pairs where Δ(field) satisfies a predicate",
+        description="Scan consecutive ledger-close snapshot pairs and print pairs "
+        "where the delta of FIELD satisfies OP VALUE.\n"
+        "Examples:\n"
+        "  xahaud-monitor find rss_mb '>' 2\n"
+        "  xahaud-monitor find counts.AL_size '>' 1000\n"
+        "  xahaud-monitor find memory_breakdown.anonymous_mb abs> 5",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    find_parser.add_argument(
+        "field",
+        type=str,
+        help="Dotted field path in a snapshot (e.g. rss_mb, counts.AL_size)",
+    )
+    find_parser.add_argument(
+        "op",
+        type=str,
+        choices=[">", ">=", "<", "<=", "==", "!=", "abs>", "abs>=", "abs<", "abs<="],
+        help="Comparison operator (use abs> for magnitude)",
+    )
+    find_parser.add_argument(
+        "value",
+        type=str,
+        help="Numeric threshold to compare delta against",
+    )
+    find_parser.add_argument(
+        "--dir",
+        type=Path,
+        default=None,
+        help="Session dir (defaults to the currently-running rippled's dir)",
+    )
+    find_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="memory_monitor_results",
+        help="Root containing session dirs (default: memory_monitor_results)",
+    )
+
     # Parse args
     args = parser.parse_args()
 
@@ -371,6 +485,14 @@ def run():
 
     if args.command == "attach":
         run_attach_mode(args)
+        return
+
+    if args.command == "diff":
+        run_diff(args)
+        return
+
+    if args.command == "find":
+        run_find(args)
         return
 
     # Handle monitor command
