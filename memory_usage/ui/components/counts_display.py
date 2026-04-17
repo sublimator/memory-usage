@@ -36,23 +36,17 @@ class CountsDisplay(VerticalScroll):
                 continue
             entry = self._history.get(key)
             if entry is None:
-                self._history[key] = {
-                    "first": value,
-                    "last": value,
-                    "ever_decreased": False,
-                }
+                self._history[key] = {"min": value, "max": value, "last": value}
                 continue
-            if value < entry["last"]:
-                entry["ever_decreased"] = True
+            entry["min"] = min(entry["min"], value)
+            entry["max"] = max(entry["max"], value)
             entry["last"] = value
 
-    def _is_monotonic_growing(self, key: str, value: Any) -> bool:
+    def _min_max(self, key: str):
         entry = self._history.get(key)
-        if entry is None or not isinstance(value, (int, float)):
-            return False
-        if entry["ever_decreased"]:
-            return False
-        return value > entry["first"]
+        if entry is None:
+            return None, None
+        return entry["min"], entry["max"]
 
     def update_counts(self, counts: Optional[Dict[str, Any]]):
         """Update the counts display with new data"""
@@ -69,11 +63,21 @@ class CountsDisplay(VerticalScroll):
         content = self._format_counts(counts)
         self._content.update(content)
 
+    @staticmethod
+    def _format_value(value: Any, suffix: str) -> str:
+        if isinstance(value, (int, float)):
+            if suffix == "%":
+                return f"{value:.3f}%"
+            return f"{value:,}{suffix}"
+        return f"{value}{suffix}"
+
     def _format_counts(self, counts: Dict[str, Any]) -> Table:
-        """Format counts data into a nice table"""
+        """Format counts data into a nice table with min/cur/max columns."""
         table = Table(show_header=True, header_style="bold cyan", box=None, expand=True)
-        table.add_column("Metric", style="yellow", width=None, ratio=2)
-        table.add_column("Value", justify="right", style="green", width=None, ratio=1)
+        table.add_column("Metric", style="yellow", ratio=2)
+        table.add_column("Min", justify="right", style="dim", ratio=1)
+        table.add_column("Cur", justify="right", style="green", ratio=1)
+        table.add_column("Max", justify="right", style="dim", ratio=1)
 
         # Group related metrics
         sections = {
@@ -114,30 +118,26 @@ class CountsDisplay(VerticalScroll):
         sections["Objects"] = object_entries
 
         for section, metrics in sections.items():
-            # Add section header
-            table.add_row(f"[bold]{section}[/bold]", "", style="bold magenta")
+            # Section header (spans the metric column; others stay blank)
+            table.add_row(f"[bold]{section}[/bold]", "", "", "", style="bold magenta")
 
-            # Add metrics
             for key, display_name, suffix in metrics:
-                if key in counts:
-                    value = counts[key]
-                    # Format the value
-                    if isinstance(value, (int, float)):
-                        # Special handling for hit rates (% suffix)
-                        if suffix == "%":
-                            formatted_value = f"{value:.3f}%"
-                        else:
-                            formatted_value = f"{value:,}{suffix}"
-                    else:
-                        formatted_value = f"{value}{suffix}"
-                    # Tag values that have only ever grown since we started
-                    # observing — useful for spotting suspected leaks.
-                    marker = (
-                        " [bold red]++[/bold red]" if self._is_monotonic_growing(key, value) else ""
-                    )
-                    table.add_row(f"  {display_name}{marker}", formatted_value)
+                if key not in counts:
+                    continue
+                value = counts[key]
+                cur_str = self._format_value(value, suffix)
+                mn, mx = self._min_max(key)
+                # Numeric values: show the observed range. Non-numeric or
+                # never-recorded keys: just the current value.
+                if isinstance(value, (int, float)) and mn is not None:
+                    min_str = self._format_value(mn, suffix) if mn != value else ""
+                    max_str = self._format_value(mx, suffix) if mx != value else ""
+                else:
+                    min_str = ""
+                    max_str = ""
+                table.add_row(f"  {display_name}", min_str, cur_str, max_str)
 
             # Add spacing between sections
-            table.add_row("", "")
+            table.add_row("", "", "", "")
 
         return table
