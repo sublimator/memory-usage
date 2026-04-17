@@ -36,8 +36,16 @@ class CountsDisplay(VerticalScroll):
                 continue
             entry = self._history.get(key)
             if entry is None:
-                self._history[key] = {"min": value, "max": value, "last": value}
+                self._history[key] = {
+                    "first": value,
+                    "min": value,
+                    "max": value,
+                    "last": value,
+                    "ever_decreased": False,
+                }
                 continue
+            if value < entry["last"]:
+                entry["ever_decreased"] = True
             entry["min"] = min(entry["min"], value)
             entry["max"] = max(entry["max"], value)
             entry["last"] = value
@@ -47,6 +55,14 @@ class CountsDisplay(VerticalScroll):
         if entry is None:
             return None, None
         return entry["min"], entry["max"]
+
+    def _is_monotonic_growing(self, key: str, value: Any) -> bool:
+        entry = self._history.get(key)
+        if entry is None or not isinstance(value, (int, float)):
+            return False
+        if entry["ever_decreased"]:
+            return False
+        return value > entry["first"]
 
     def update_counts(self, counts: Optional[Dict[str, Any]]):
         """Update the counts display with new data"""
@@ -135,7 +151,13 @@ class CountsDisplay(VerticalScroll):
                 else:
                     min_str = ""
                     max_str = ""
-                table.add_row(f"  {display_name}", min_str, cur_str, max_str)
+                # Eyeball marker: value has only ever grown since we started
+                # observing. Redundant-ish with the min/max columns but quick
+                # to spot at a glance.
+                marker = (
+                    " [bold red]++[/bold red]" if self._is_monotonic_growing(key, value) else ""
+                )
+                table.add_row(f"  {display_name}{marker}", min_str, cur_str, max_str)
 
             # Add spacing between sections
             table.add_row("", "", "", "")
