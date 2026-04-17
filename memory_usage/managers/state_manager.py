@@ -56,6 +56,9 @@ class ApplicationState:
     validated_age_s: Optional[int] = None
     closed_ledger_seq: Optional[int] = None
     closed_ledger_age_s: Optional[int] = None
+    # Process uptime as reported by server_info.uptime — seconds since rippled
+    # started (not since we attached). Useful in attach mode.
+    rippled_uptime_s: Optional[int] = None
 
 
 class StateManager:

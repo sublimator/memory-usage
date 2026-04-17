@@ -141,6 +141,12 @@ class StatusBar(Static):
             total_time = format_duration(state.elapsed_seconds)
             timing_parts = [f"Total: {total_time}"]
 
+            # rippled_uptime_s comes from server_info.uptime — how long the
+            # rippled process itself has been running, independent of when we
+            # attached. Most meaningful in attach mode but harmless in spawn.
+            if state.rippled_uptime_s is not None:
+                timing_parts.append(f"Up: {format_duration(state.rippled_uptime_s)}")
+
             # Add sync time
             if state.sync_duration_seconds is not None:
                 sync_time = format_duration(state.sync_duration_seconds)

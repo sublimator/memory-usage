@@ -233,6 +233,9 @@ class MonitoringService:
             state.closed_ledger_seq = None
             state.closed_ledger_age_s = None
 
+        uptime = server_info.get("uptime")
+        state.rippled_uptime_s = int(uptime) if isinstance(uptime, (int, float)) else None
+
     async def stop_monitoring(self, wait_for_process: bool = True):
         """Stop monitoring.
 
