@@ -24,6 +24,7 @@ from ..services import MonitoringService
 from .components import (
     CatalogueStatusDisplay,
     CountsDisplay,
+    HeapDisplay,
     JobsDisplay,
     MemoryBreakdownDisplay,
     MemoryGraph,
@@ -143,6 +144,9 @@ class MemoryMonitorDashboard(App):
     catalogue_display_stats: CatalogueStatusDisplay
     memory_breakdown_display_stats: MemoryBreakdownDisplay
     shamap_pools_display_stats: SHAMapPoolsDisplay
+    # Heap tab — only populated when --heap-every-ledger is enabled on a
+    # macOS host; empty panel with a gentle message otherwise.
+    heap_display: HeapDisplay
 
     CSS = """
     Screen {
@@ -300,6 +304,14 @@ class MemoryMonitorDashboard(App):
     #stats-right JobsDisplay,
     #stats-right CatalogueStatusDisplay {
         height: 1fr;
+    }
+
+    /* Heap tab: single widget fills the whole pane. */
+    HeapDisplay {
+        height: 1fr;
+        border: solid $accent;
+        padding: 1;
+        background: $surface;
     }
 
     /* Fixed 17-row height so it sits at the bottom of the Overview pane
@@ -496,6 +508,11 @@ class MemoryMonitorDashboard(App):
                         self.catalogue_display_stats = CatalogueStatusDisplay()
                         yield self.catalogue_display_stats
 
+            # ─── Heap: live heap(1) top-classes + ↑↑ monotonic grower mark ──
+            with TabPane("Heap", id="tab-heap"):
+                self.heap_display = HeapDisplay()
+                yield self.heap_display
+
         yield Footer()
 
     def on_mount(self) -> None:
@@ -571,6 +588,20 @@ class MemoryMonitorDashboard(App):
             if counts:
                 self.counts_display.update_counts(counts)
                 self.counts_display_stats.update_counts(counts)
+
+        # Heap sample history — replay so the ↑↑ monotonic markers reflect
+        # the full series, not just what arrives post-reattach. Most
+        # snapshots won't have a heap_sample (feature is opt-in), so the
+        # inner work only fires on the subset that does.
+        self.heap_display.reset_history()
+        last_heap: Optional[Dict[str, Any]] = None
+        for s in snapshots:
+            hs = s.get("heap_sample")
+            if isinstance(hs, dict) and hs.get("ok"):
+                self.heap_display.update_sample(hs)
+                last_heap = hs
+        if last_heap is not None:
+            self.state_manager.state.heap_sample = last_heap
 
         # Latest values -> state, then a single notify so other widgets paint
         # once from the tail of the history. Everything the status bar and
@@ -672,6 +703,8 @@ class MemoryMonitorDashboard(App):
             if state.memory_breakdown:
                 self.memory_breakdown_display.update_breakdown(state.memory_breakdown)
                 self.memory_breakdown_display_stats.update_breakdown(state.memory_breakdown)
+            if state.heap_sample:
+                self.heap_display.update_sample(state.heap_sample)
 
             # Detect new process start
             if state.current_pid and state.current_pid != self._last_pid:
