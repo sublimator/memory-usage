@@ -19,6 +19,7 @@ from .utils import (
     parse_rippled_config,
 )
 from .utils.ledger_diff import (
+    build_and_render_summary,
     find_delta_matches,
     load_ledger_snapshots,
     render_diff,
@@ -107,6 +108,28 @@ def run_diff(args):
         )
         sys.exit(1)
     render_diff(from_snap, to_snap, first_ledger=first_ledger)
+
+
+def run_summary(args):
+    """One-screen triage view of a session dir."""
+    import json as _json
+
+    root = Path(args.output_dir)
+    dir_path, err = resolve_session_dir(root, args.dir)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        sys.exit(2)
+    assert dir_path is not None
+    events_path = dir_path / "events.jsonl"
+    meta_path = dir_path / "meta.json"
+    meta = {}
+    if meta_path.exists():
+        try:
+            with open(meta_path) as f:
+                meta = _json.load(f)
+        except (OSError, _json.JSONDecodeError):
+            pass
+    build_and_render_summary(events_path, meta, top_n=args.top)
 
 
 def run_find(args):
@@ -429,6 +452,31 @@ def run():
         help="Root containing session dirs (default: memory_monitor_results)",
     )
 
+    # Summary command — one-screen triage view of a session dir
+    summary_parser = subparsers.add_parser(
+        "summary",
+        help="Summarise a session dir (sessions, span, net memory, top movers)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    summary_parser.add_argument(
+        "--dir",
+        type=Path,
+        default=None,
+        help="Session dir (defaults to the currently-running rippled's dir)",
+    )
+    summary_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="memory_monitor_results",
+        help="Root containing session dirs (default: memory_monitor_results)",
+    )
+    summary_parser.add_argument(
+        "--top",
+        type=int,
+        default=10,
+        help="Top N count movers to show (default: 10, 0 to skip)",
+    )
+
     # Find command — scan consecutive ledger pairs for a delta predicate.
     # Dotted field paths supported: counts.AL_size, memory_breakdown.anonymous_mb.
     find_parser = subparsers.add_parser(
@@ -497,6 +545,10 @@ def run():
 
     if args.command == "find":
         run_find(args)
+        return
+
+    if args.command == "summary":
+        run_summary(args)
         return
 
     # Handle monitor command

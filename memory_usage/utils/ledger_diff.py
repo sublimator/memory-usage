@@ -262,6 +262,233 @@ def find_delta_matches(
     return matches
 
 
+def build_and_render_summary(
+    events_path: Path,
+    meta: Dict[str, Any],
+    top_n: int = 10,
+    console: Optional[Console] = None,
+) -> None:
+    """One-screen triage view: sessions + span + net memory + top count growers.
+
+    Walks events.jsonl once, bucketing per-session stats (peak_rss, txns,
+    ledger range, wall span). First/last snapshot across the *entire*
+    stream drives the net-memory and count-deltas blocks.
+    """
+    console = console or Console()
+
+    first_snap: Optional[Dict[str, Any]] = None
+    last_snap: Optional[Dict[str, Any]] = None
+    first_ledger: Optional[int] = None
+    last_ledger: Optional[int] = None
+    snapshot_count = 0
+
+    # Per-session aggregate. Key is session number; entry is a dict we
+    # mutate in place as we walk. status defaults to "interrupted" so that
+    # a session with no session_end event (killed monitor) is visible.
+    current_n: Optional[int] = None
+    sessions: Dict[int, Dict[str, Any]] = {}
+
+    def _new_session(n: int, mode: str, start: Optional[datetime]) -> None:
+        sessions[n] = {
+            "n": n,
+            "mode": mode,
+            "start": start,
+            "end": None,
+            "status": "interrupted",
+            "peak_rss_mb": 0.0,
+            "total_txns": 0,
+            "total_ledgers": 0,
+            "first_ledger": None,
+            "last_ledger": None,
+            "last_t": start,
+        }
+
+    with open(events_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = _parse_ts(ev.get("t"))
+            kind = ev.get("event")
+            if kind == "session_start":
+                n = int(ev.get("session") or (max(sessions) + 1 if sessions else 1))
+                current_n = n
+                _new_session(n, str(ev.get("mode") or "?"), t)
+            elif kind == "session_end" and current_n is not None:
+                entry = sessions.get(current_n)
+                if entry is not None:
+                    entry["end"] = t
+                    entry["status"] = str(ev.get("status") or "completed")
+                    if t is not None:
+                        entry["last_t"] = t
+                current_n = None
+            elif kind == "snapshot":
+                snapshot_count += 1
+                if first_snap is None:
+                    first_snap = ev
+                    first_ledger = ev.get("ledger_index")
+                last_snap = ev
+                if ev.get("ledger_index") is not None:
+                    last_ledger = ev.get("ledger_index")
+                if current_n is not None:
+                    entry = sessions.get(current_n)
+                    if entry is not None:
+                        if t is not None:
+                            entry["last_t"] = t
+                        rss = _coerce_float(ev.get("rss_mb"))
+                        if rss is not None and rss > entry["peak_rss_mb"]:
+                            entry["peak_rss_mb"] = rss
+                        txn = _coerce_float(ev.get("transaction_count"))
+                        if txn:
+                            entry["total_txns"] += int(txn)
+                        idx = ev.get("ledger_index")
+                        if idx is not None:
+                            entry["total_ledgers"] += 1
+                            if entry["first_ledger"] is None:
+                                entry["first_ledger"] = idx
+                            entry["last_ledger"] = idx
+
+    # --- header ---------------------------------------------------------
+    binary = meta.get("binary_name", "?")
+    pid = meta.get("pid", "?")
+    first_seen = meta.get("first_seen", "?")
+    console.print(f"[bold cyan]{binary}[/bold cyan]  pid {pid}  first seen {first_seen}")
+    if snapshot_count == 0:
+        console.print("[yellow]no snapshots in events.jsonl[/yellow]")
+        return
+    console.print(f"[dim]{snapshot_count:,} snapshots  [bold]{events_path}[/bold][/dim]")
+    console.print()
+
+    # --- sessions table -------------------------------------------------
+    sess_table = Table(title="Sessions", title_style="bold", header_style="bold cyan", box=None)
+    sess_table.add_column("#", justify="right", style="yellow")
+    sess_table.add_column("Mode", style="dim")
+    sess_table.add_column("Start", style="dim")
+    sess_table.add_column("Span", justify="right")
+    sess_table.add_column("Ledgers", justify="right")
+    sess_table.add_column("Txns", justify="right")
+    sess_table.add_column("Peak RSS", justify="right")
+    sess_table.add_column("Status", style="dim")
+    for n in sorted(sessions):
+        e = sessions[n]
+        span_end = e.get("end") or e.get("last_t")
+        span_s = None
+        if e.get("start") and span_end:
+            span_s = (span_end - e["start"]).total_seconds()
+        ledger_str = ""
+        if e["first_ledger"] is not None and e["last_ledger"] is not None:
+            ledger_str = f"{e['total_ledgers']:,} ({e['first_ledger']:,}→{e['last_ledger']:,})"
+        sess_table.add_row(
+            str(e["n"]),
+            e["mode"],
+            e["start"].strftime("%H:%M:%S") if e.get("start") else "?",
+            _fmt_uptime(int(span_s)) if span_s is not None else "?",
+            ledger_str,
+            f"{e['total_txns']:,}" if e["total_txns"] else "",
+            f"{e['peak_rss_mb']:,.0f} MB" if e["peak_rss_mb"] else "",
+            e["status"],
+        )
+    console.print(sess_table)
+
+    # --- ledger / wall span --------------------------------------------
+    total_span_s = 0.0
+    for e in sessions.values():
+        span_end = e.get("end") or e.get("last_t")
+        if e.get("start") and span_end:
+            total_span_s += max(0.0, (span_end - e["start"]).total_seconds())
+    total_txns_all = sum(e["total_txns"] for e in sessions.values())
+    total_ledgers_all = sum(e["total_ledgers"] for e in sessions.values())
+    console.print()
+    parts = []
+    if first_ledger and last_ledger:
+        parts.append(f"ledgers {first_ledger:,} → {last_ledger:,}")
+        if total_ledgers_all:
+            parts.append(f"{total_ledgers_all:,} captured")
+    if total_txns_all:
+        parts.append(f"{total_txns_all:,} txns")
+    parts.append(f"wall {_fmt_uptime(int(total_span_s))}")
+    console.print("[bold]Span[/bold]  " + "  ".join(parts))
+
+    # --- net memory ----------------------------------------------------
+    if first_snap is not None and last_snap is not None:
+        mem_table = Table(
+            title="Net memory (first → last snapshot)",
+            title_style="bold",
+            header_style="bold cyan",
+            box=None,
+        )
+        mem_table.add_column("Metric", style="yellow")
+        mem_table.add_column("First", justify="right", style="dim")
+        mem_table.add_column("Last", justify="right", style="green")
+        mem_table.add_column("Δ", justify="right")
+        for label, path in [
+            ("RSS MB", "rss_mb"),
+            ("heap_mb", "heap_mb"),
+            ("pool_current_mb", "pool_current_mb"),
+            ("pool_peak_mb", "pool_peak_mb"),
+            ("pool_wasted_mb", "pool_wasted_mb"),
+        ]:
+            a = _lookup(first_snap, path)
+            b = _lookup(last_snap, path)
+            if a is None or b is None:
+                continue
+            delta = b - a
+            style = "red" if delta > 0 else ("green" if delta < 0 else "dim")
+            mem_table.add_row(
+                label,
+                f"{a:,.1f}",
+                f"{b:,.1f}",
+                f"[{style}]{delta:+,.1f}[/{style}]",
+            )
+        console.print()
+        console.print(mem_table)
+
+    # --- top count growers ---------------------------------------------
+    if first_snap is not None and last_snap is not None and top_n > 0:
+        flat_a: Dict[str, float] = {}
+        flat_b: Dict[str, float] = {}
+        _flatten_numeric("", first_snap.get("counts") or {}, flat_a)
+        _flatten_numeric("", last_snap.get("counts") or {}, flat_b)
+        rows: List[Tuple[str, float, float, float]] = []
+        for k in set(flat_a) | set(flat_b):
+            a = flat_a.get(k)
+            b = flat_b.get(k)
+            if a is None or b is None:
+                continue
+            delta = b - a
+            if delta == 0:
+                continue
+            rows.append((k, a, b, delta))
+        rows.sort(key=lambda r: -abs(r[3]))
+        if rows:
+            ct_table = Table(
+                title=f"Top {min(top_n, len(rows))} count movers (by |Δ|)",
+                title_style="bold",
+                header_style="bold cyan",
+                box=None,
+            )
+            ct_table.add_column("Metric", style="yellow")
+            ct_table.add_column("First", justify="right", style="dim")
+            ct_table.add_column("Last", justify="right", style="green")
+            ct_table.add_column("Δ", justify="right")
+            for k, a, b, delta in rows[:top_n]:
+                style = "red" if delta > 0 else ("green" if delta < 0 else "dim")
+                is_int = a == int(a) and b == int(b)
+                fmt = "{:,.0f}" if is_int else "{:,.3f}"
+                ct_table.add_row(
+                    k,
+                    fmt.format(a),
+                    fmt.format(b),
+                    f"[{style}]{'+' if delta > 0 else ''}{fmt.format(delta)}[/{style}]",
+                )
+            console.print()
+            console.print(ct_table)
+
+
 def render_find_results(
     field_path: str,
     op: str,
