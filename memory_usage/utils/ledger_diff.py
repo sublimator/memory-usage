@@ -23,10 +23,19 @@ from .session_store import session_dir_name
 
 
 def _session_dirs(root: Path) -> List[Path]:
-    """Subdirs of ``root`` that contain an events.jsonl, sorted newest first."""
+    """Subdirs of ``root`` with events.jsonl, sorted newest first.
+
+    Skips ``.bak-*`` dirs created by ``--fresh`` — they're preserved
+    for post-mortem recovery but shouldn't outrank the real last
+    session on mtime just because the user ran --fresh recently.
+    """
     if not root.exists():
         return []
-    dirs = [d for d in root.iterdir() if d.is_dir() and (d / "events.jsonl").exists()]
+    dirs = [
+        d
+        for d in root.iterdir()
+        if d.is_dir() and ".bak-" not in d.name and (d / "events.jsonl").exists()
+    ]
     dirs.sort(key=lambda d: (d / "events.jsonl").stat().st_mtime, reverse=True)
     return dirs
 

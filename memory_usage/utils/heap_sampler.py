@@ -370,75 +370,123 @@ def render_heap_sample(sample: Dict[str, Any], top_n: Optional[int] = None) -> N
 
 
 def build_heap_trend(
-    events_path: Path,
+    session_dir: Path,
     binary: Optional[str] = None,
     grep: Optional[str] = None,
     include_non_object: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Walk events.jsonl and aggregate per-class heap size over time.
+    """Walk a session's heap samples and aggregate per-class size over time.
 
-    Returns ``(rows, meta)``:
-      - ``rows``: one per (class, binary) with first/last/max/monotonic.
-      - ``meta``: {sample_count, alloc_site_samples, class_samples} — the
-        caller uses this to decide whether to print a "MallocStackLogging
-        active" banner. Without that warning users read a flat trend and
-        think they're done, when really they're looking at a ~5% sample
-        of allocations grouped by call site.
+    Prefers the raw ``heap_samples/<ledger>.txt`` files when present — they
+    carry every class heap(1) emitted, not just the top-50 we stashed in
+    the snapshot. That matters when user-space C++ classes get outranked
+    by ObjC runtime chunks and would otherwise be invisible to trend
+    analysis. Falls back to the jsonl snapshot ``heap_sample.top`` when
+    raw files are missing (older sessions, or the sample failed to flush).
 
-    ``include_non_object`` defaults to False because the "non-object"
-    bucket can dominate and hide the class-level signal; turn it on to
-    surface that row explicitly (that's where class-view growth often
-    lives on C++ code with few RTTI types).
+    ``include_non_object`` is off by default because the non-object bucket
+    can dominate and hide per-class signal; surface it explicitly when
+    class-level trends look flat.
     """
-    # class_key -> list of (sample_index, bytes, count, binary, type)
     per_class: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-    sample_index = 0
     alloc_site_samples = 0
     class_samples = 0
+    sample_index = 0
+    source = "jsonl"  # switched to "raw" when we find raw files
 
-    with open(events_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
+    compiled_grep = None
+    if grep:
+        try:
+            compiled_grep = re.compile(grep)
+        except re.error:
+            compiled_grep = re.compile(re.escape(grep))
+
+    def _accept(row: Dict[str, Any]) -> bool:
+        cls = row.get("class") or ""
+        bin_ = row.get("binary") or ""
+        typ = row.get("type") or ""
+        if not include_non_object and typ == "N":
+            return False
+        if binary and binary.lower() not in bin_.lower():
+            return False
+        if compiled_grep is not None and not compiled_grep.search(cls):
+            return False
+        return True
+
+    def _record(sample_idx: int, row: Dict[str, Any]) -> None:
+        per_class.setdefault((row["class"] or "", row["binary"] or ""), []).append(
+            {
+                "sample_idx": sample_idx,
+                "bytes": int(row.get("bytes") or 0),
+                "count": int(row.get("count") or 0),
+                "type": row.get("type") or "",
+            }
+        )
+
+    raw_dir = session_dir / "heap_samples"
+    if raw_dir.exists():
+        # Sort by ledger index (filename stem is int) so the time series
+        # is consistent. Falls back to string sort if names aren't ints.
+        def _sort_key(p: Path) -> Tuple[int, str]:
             try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if ev.get("event") != "snapshot":
-                continue
-            sample = ev.get("heap_sample")
-            if not isinstance(sample, dict) or not sample.get("ok"):
-                continue
-            sample_index += 1
-            mode = sample.get("mode") or "class"
-            if mode == "alloc-site":
-                alloc_site_samples += 1
-            else:
-                class_samples += 1
-            for row in sample.get("top") or []:
-                cls = row.get("class") or ""
-                bin_ = row.get("binary") or ""
-                typ = row.get("type") or ""
-                if not include_non_object and typ == "N":
+                return (int(p.stem), "")
+            except ValueError:
+                return (0, p.stem)
+
+        raw_files = sorted((p for p in raw_dir.glob("*.txt") if p.is_file()), key=_sort_key)
+        if raw_files:
+            source = "raw"
+            for p in raw_files:
+                try:
+                    text = p.read_text(encoding="utf-8")
+                except OSError:
                     continue
-                if binary and binary.lower() not in bin_.lower():
+                rows, _diag = _parse_heap_output(text)
+                if not rows:
                     continue
-                if grep:
-                    try:
-                        pat = re.compile(grep)
-                    except re.error:
-                        pat = re.compile(re.escape(grep))
-                    if not pat.search(cls):
-                        continue
-                per_class.setdefault((cls, bin_), []).append(
-                    {
-                        "sample_idx": sample_index,
-                        "bytes": int(row.get("bytes") or 0),
-                        "count": int(row.get("count") or 0),
-                        "type": typ,
-                    }
-                )
+                sample_index += 1
+                mode = detect_mode(rows)
+                if mode == "alloc-site":
+                    alloc_site_samples += 1
+                else:
+                    class_samples += 1
+                for r in rows:
+                    if _accept(r):
+                        _record(sample_index, r)
+
+    if source == "jsonl":
+        events_path = session_dir / "events.jsonl"
+        if not events_path.exists():
+            meta = {
+                "sample_count": 0,
+                "alloc_site_samples": 0,
+                "class_samples": 0,
+                "source": source,
+            }
+            return [], meta
+        with open(events_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("event") != "snapshot":
+                    continue
+                sample = ev.get("heap_sample")
+                if not isinstance(sample, dict) or not sample.get("ok"):
+                    continue
+                sample_index += 1
+                mode = sample.get("mode") or "class"
+                if mode == "alloc-site":
+                    alloc_site_samples += 1
+                else:
+                    class_samples += 1
+                for row in sample.get("top") or []:
+                    if _accept(row):
+                        _record(sample_index, row)
 
     results: List[Dict[str, Any]] = []
     for (cls, bin_), series in per_class.items():
@@ -479,6 +527,7 @@ def build_heap_trend(
         "sample_count": sample_index,
         "alloc_site_samples": alloc_site_samples,
         "class_samples": class_samples,
+        "source": source,
     }
     return results, meta
 
@@ -505,9 +554,16 @@ def render_heap_trend(
     if meta:
         n = meta.get("sample_count") or 0
         alloc_site = meta.get("alloc_site_samples") or 0
+        source = meta.get("source") or "jsonl"
         if n == 0:
-            console.print("[yellow]no heap samples in events.jsonl[/yellow]")
+            console.print("[yellow]no heap samples in session dir[/yellow]")
             return
+        source_note = (
+            "raw heap_samples/*.txt (full class list)"
+            if source == "raw"
+            else "events.jsonl (top-50 per snapshot)"
+        )
+        console.print(f"[dim]source: {source_note}[/dim]")
         if alloc_site and alloc_site == n:
             console.print(
                 "[yellow]banner:[/yellow] all "

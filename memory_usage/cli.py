@@ -176,11 +176,10 @@ def run_heap(args):
 
 
 def run_heap_trend(args):
-    """Per-class heap growth across all heap_sample events in a session dir."""
+    """Per-class heap growth across all heap samples in a session dir."""
     dir_path = _resolve_or_exit(args)
-    events_path = dir_path / "events.jsonl"
     rows, meta = build_heap_trend(
-        events_path,
+        dir_path,
         binary=args.binary,
         grep=args.grep,
         include_non_object=args.include_non_object,
