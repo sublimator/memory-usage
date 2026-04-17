@@ -150,7 +150,15 @@ class CountsDisplay(VerticalScroll):
 
     def _format_counts(self, counts: Dict[str, Any]) -> Table:
         """Format counts data into a min/cur/max table with inline markers."""
-        table = Table(show_header=True, header_style="bold cyan", box=None, expand=True)
+        table = Table(
+            show_header=True,
+            header_style="bold cyan",
+            box=None,
+            expand=True,
+            # Subtle zebra stripes so the eye can track across a wide row
+            # without losing its place in a dense panel.
+            row_styles=["", "on grey15"],
+        )
         table.add_column("Metric", style="yellow", ratio=3)
         table.add_column("Min", justify="right", style="dim", ratio=1)
         table.add_column("Cur", justify="right", style="green", ratio=1)
