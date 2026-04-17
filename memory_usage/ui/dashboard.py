@@ -4,7 +4,7 @@ Main dashboard application using dependency injection
 
 import asyncio
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from dependency_injector.wiring import Provide, inject
 from textual.app import App, ComposeResult
@@ -32,6 +32,92 @@ from .components import (
     SHAMapPoolsDisplay,
     StatusBar,
 )
+
+
+def _parse_event_ts(t: Optional[str]) -> Optional[datetime]:
+    if not t:
+        return None
+    try:
+        # SessionStore writes ``YYYY-MM-DDTHH:MM:SS[.sss]Z``. fromisoformat
+        # doesn't accept the trailing Z in older Pythons, so strip it.
+        return datetime.fromisoformat(t.rstrip("Z"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _derive_timing_from_events(
+    events: List[Dict[str, Any]],
+) -> tuple[float, float, Optional[float]]:
+    """Compute (prior_elapsed, prior_monitoring, original_sync) from events.
+
+    Walks the event stream and reconstructs per-session spans using the
+    ``t`` timestamps that every event carries. For each session:
+
+    - Session span = time from session_start → session_end (or the last
+      event before the next session_start / end of stream if session_end
+      is missing — e.g. the monitor was killed).
+    - Sync-complete point = first snapshot whose ``monitoring_elapsed_seconds``
+      is not None. Duration from session_start to that point is this
+      session's sync time.
+    - Monitoring time = session end minus sync-complete point.
+
+    ``original_sync`` is the first session whose sync time exceeded 1s —
+    shorter than that means "reattached to an already-synced node" and
+    isn't the real cold-boot sync time.
+    """
+    prior_elapsed = 0.0
+    prior_monitoring = 0.0
+    original_sync: Optional[float] = None
+
+    current_start: Optional[datetime] = None
+    current_synced_at: Optional[datetime] = None
+    current_last_t: Optional[datetime] = None
+
+    def close_session(end_at: datetime) -> None:
+        nonlocal prior_elapsed, prior_monitoring, original_sync
+        if current_start is None:
+            return
+        prior_elapsed += max(0.0, (end_at - current_start).total_seconds())
+        if current_synced_at is not None:
+            session_sync = (current_synced_at - current_start).total_seconds()
+            if original_sync is None and session_sync > 1.0:
+                original_sync = session_sync
+            prior_monitoring += max(0.0, (end_at - current_synced_at).total_seconds())
+
+    for ev in events:
+        t = _parse_event_ts(ev.get("t"))
+        kind = ev.get("event")
+        if kind == "session_start":
+            if current_start is not None and current_last_t is not None:
+                # Previous session lacked a session_end (crash/kill). Use
+                # the last event we saw as its end.
+                close_session(current_last_t)
+            current_start = t
+            current_synced_at = None
+            current_last_t = t
+        elif kind == "session_end":
+            if current_start is not None and t is not None:
+                close_session(t)
+            current_start = None
+            current_synced_at = None
+            current_last_t = None
+        elif kind == "snapshot":
+            if t is not None:
+                current_last_t = t
+            if current_start is not None and current_synced_at is None:
+                if ev.get("monitoring_elapsed_seconds") is not None:
+                    current_synced_at = t
+        else:
+            if t is not None:
+                current_last_t = t
+
+    # Open session at EOF (monitor still running during this hydrate is not
+    # possible, but a prior run that was killed leaves this open). Close it
+    # at the last timestamp we saw.
+    if current_start is not None and current_last_t is not None:
+        close_session(current_last_t)
+
+    return prior_elapsed, prior_monitoring, original_sync
 
 
 class MemoryMonitorDashboard(App):
@@ -318,6 +404,7 @@ class MemoryMonitorDashboard(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit", priority=True),
+        Binding("ctrl+c", "quit", "Quit", priority=True, show=False),
         Binding("c", "clear", "Clear logs"),
         Binding("space", "pause", "Pause/Resume"),
         Binding("s", "stop_process", "Stop rippled"),
@@ -429,8 +516,85 @@ class MemoryMonitorDashboard(App):
         self.set_interval(0.1, self._process_queues)
         self.set_interval(1.0, self._update_memory_stats)
 
+        # Register UI hydration for reattach — MonitoringService invokes this
+        # during _open_session when a prior events.jsonl exists, so widgets
+        # are populated before live updates resume.
+        self.monitoring_service.set_hydrate_callback(self._hydrate_ui_from_events)
+
         # Start the test (save worker so we can cancel it on quit)
         self._monitoring_worker = self.run_worker(self._start_monitoring, exclusive=True)
+
+    async def _hydrate_ui_from_events(
+        self, events: List[Dict[str, Any]], meta: Dict[str, Any]
+    ) -> None:
+        """Replay prior snapshots + derive baselines from event timestamps.
+
+        Timing is computed from the jsonl stream's ``t`` field, NOT from
+        meta.json session entries — durations there only exist if the
+        monitor exited cleanly, but events are line-buffered so they
+        survive Ctrl+C, SIGKILL, panic, etc. meta is treated as an
+        optional cache, nothing more.
+        """
+        prior_elapsed, prior_monitoring, original_sync = _derive_timing_from_events(events)
+        state = self.state_manager.state
+        state.prior_elapsed_seconds = prior_elapsed
+        state.prior_monitoring_seconds = prior_monitoring
+        if original_sync is not None:
+            state.original_sync_duration_seconds = original_sync
+
+        snapshots = [e for e in events if e.get("event") == "snapshot"]
+        if not snapshots:
+            # Still notify observers so the timing baseline lands in the UI.
+            await self.state_manager._notify_observers()
+            return
+
+        # Memory graph: bulk-load (unix_ts, rss_mb) points.
+        points: List[tuple[float, float]] = []
+        for s in snapshots:
+            ts_str = s.get("timestamp")
+            rss = s.get("rss_mb", 0) or 0
+            if ts_str and rss > 0:
+                try:
+                    # Pydantic isoformat() — no Z suffix, but strip just in case.
+                    ts = datetime.fromisoformat(ts_str.rstrip("Z")).timestamp()
+                    points.append((ts, float(rss)))
+                except (ValueError, TypeError):
+                    continue
+        if points:
+            self.memory_graph.hydrate(points)
+
+        # Counts trend: each historical counts dict fed through the display
+        # so _TREND_WINDOW has real samples to latch onto. Inefficient (one
+        # render per call) but one-off at attach time.
+        for s in snapshots:
+            counts = s.get("counts")
+            if counts:
+                self.counts_display.update_counts(counts)
+                self.counts_display_stats.update_counts(counts)
+
+        # Latest values -> state, then a single notify so other widgets paint
+        # once from the tail of the history.
+        latest = snapshots[-1]
+        state = self.state_manager.state
+        if latest.get("counts"):
+            state.counts = latest["counts"]
+        if latest.get("job_types"):
+            state.job_types = latest["job_types"]
+        if latest.get("memory_breakdown"):
+            state.memory_breakdown = latest["memory_breakdown"]
+        if latest.get("complete_ledgers"):
+            state.complete_ledgers = latest["complete_ledgers"]
+            state.ledger_count = latest.get("ledger_count", 0) or 0
+        rss_mb = latest.get("rss_mb")
+        if rss_mb:
+            state.current_memory_mb = float(rss_mb)
+            state.current_memory_percent = float(latest.get("memory_percent", 0) or 0)
+            state.num_threads = int(latest.get("num_threads", 0) or 0)
+        await self.state_manager._notify_observers()
+
+        self.monitor_log.queue_message(
+            f">>> Hydrated {len(snapshots)} prior snapshot(s) <<<", "bold cyan"
+        )
 
     def _setup_logging(self):
         """Set up logging to capture to the monitor log"""
@@ -626,18 +790,25 @@ class MemoryMonitorDashboard(App):
     async def action_quit(self) -> None:
         """Quit the application with proper cleanup.
 
-        Cap cleanup at a short timeout, cancel the monitoring worker, and
-        ask the monitoring service not to wait on the child — otherwise
-        asyncio's interpreter-teardown step would block on the executor
-        thread still inside ``subprocess.wait(timeout=10)``.
+        Cancel the monitoring worker and *wait* for its ``finally`` block to
+        run — that's where _close_session writes meta.json with this
+        session's durations. If we exit before the finally completes, Total
+        never gets persisted and the next reattach's baseline is 0.
         """
         if self._monitoring_worker is not None:
             self._monitoring_worker.cancel()
+            try:
+                # Cap at 2s: _close_session is synchronous file I/O (<10ms);
+                # the only thing that can drag is process.stop, and we ask
+                # that to fire-and-forget via wait_for_process=False below.
+                await asyncio.wait_for(self._monitoring_worker.wait(), timeout=2.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
 
         try:
             await asyncio.wait_for(
                 self.monitoring_service.stop_monitoring(wait_for_process=False),
-                timeout=1.5,
+                timeout=1.0,
             )
         except (asyncio.TimeoutError, Exception):
             pass  # Best effort — OS will reap anything left

@@ -147,10 +147,16 @@ class StatusBar(Static):
             if state.rippled_uptime_s is not None:
                 timing_parts.append(f"Up: {format_duration(state.rippled_uptime_s)}")
 
-            # Add sync time
-            if state.sync_duration_seconds is not None:
-                sync_time = format_duration(state.sync_duration_seconds)
-                timing_parts.append(f"Sync: {sync_time}")
+            # Add sync time — prefer the hydrated original (first session
+            # that actually synced) over the current session's value, which
+            # would read ~0 on a reattach to an already-synced node.
+            sync_for_display = (
+                state.original_sync_duration_seconds
+                if state.original_sync_duration_seconds is not None
+                else state.sync_duration_seconds
+            )
+            if sync_for_display is not None:
+                timing_parts.append(f"Sync: {format_duration(sync_for_display)}")
 
             # Add test time
             if state.monitoring_elapsed_seconds is not None:

@@ -61,6 +61,26 @@ class MemoryGraph(Vertical):
 
         self.last_update = current_time
 
+    def hydrate(self, points: list[tuple[float, float]]) -> None:
+        """Bulk-load historical (unix_ts, rss_mb) points after a reattach.
+
+        Only the last ``memory_data.maxlen`` points are retained — the deque
+        silently drops overflow from the left. Called once before live updates
+        resume, so paint only happens at the end.
+        """
+        if not points:
+            return
+        for ts, rss in points:
+            if rss > 0:
+                self.memory_data.append((ts, rss))
+        if self.memory_data:
+            self._update_graph()
+            latest_mb = self.memory_data[-1][1]
+            try:
+                self.query_one("#memory-value", Static).update(f"{latest_mb:.1f}MB")
+            except Exception:
+                pass
+
     def _update_graph(self):
         """Update the graph to show all collected data"""
         if not self.memory_data:
