@@ -59,6 +59,11 @@ class CountsDisplay(VerticalScroll):
                     # by _trend_marker to compute 'went up more often than
                     # down' over the last ~_TREND_WINDOW samples.
                     "deltas": deque(maxlen=_TREND_WINDOW),
+                    # Latched trend — once we've shown '↑' or '↓' it stays
+                    # until the *opposite* direction crosses the majority
+                    # threshold. Prevents the arrow flickering on/off as
+                    # the window oscillates around 60%.
+                    "trend": None,  # 'up' | 'down' | None (never decided)
                 }
                 continue
             delta = value - entry["last"]
@@ -88,13 +93,13 @@ class CountsDisplay(VerticalScroll):
         return bool(value > entry["first"])
 
     def _trend_marker(self, key: str) -> str:
-        """Recent-direction arrow: majority up / down over the last window.
+        """Recent-direction arrow with latching.
 
-        Counts positive vs negative step-deltas in the rolling _TREND_WINDOW.
-        Arrow shows only when one direction hits _TREND_MAJORITY of all
-        non-zero moves — mixed or sparse activity renders as empty so the
-        eye doesn't get pulled toward noise. Pairs with '++' (strict 'never
-        decreased'): '++' = always grew, ↑ = usually grows now.
+        Tallies up vs down step-deltas in the rolling _TREND_WINDOW. A new
+        direction *only replaces* the latched one if it crosses
+        _TREND_MAJORITY — so '↑' stays until '↓' actually takes majority,
+        and vice versa. Avoids the arrow blinking in/out when a metric
+        hovers around the threshold.
         """
         entry = self._history.get(key)
         if entry is None:
@@ -102,14 +107,21 @@ class CountsDisplay(VerticalScroll):
         deltas = entry["deltas"]
         if len(deltas) < 5:
             return ""  # need a few samples before we commit to a direction
+
         ups = sum(1 for d in deltas if d > 0)
         downs = sum(1 for d in deltas if d < 0)
         moves = ups + downs
-        if moves == 0:
-            return ""  # stable — nothing interesting
-        if ups / moves >= _TREND_MAJORITY:
+        if moves > 0:
+            if ups / moves >= _TREND_MAJORITY:
+                entry["trend"] = "up"
+            elif downs / moves >= _TREND_MAJORITY:
+                entry["trend"] = "down"
+            # else: keep whatever was latched last — don't blank it out
+
+        trend = entry.get("trend")
+        if trend == "up":
             return "[bold red]↑[/bold red]"
-        if downs / moves >= _TREND_MAJORITY:
+        if trend == "down":
             return "[bold green]↓[/bold green]"
         return ""
 
