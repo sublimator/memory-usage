@@ -64,6 +64,10 @@ class MonitoringService:
         self._last_snapshot_rss_mb: Optional[float] = None
         self._last_snapshot_anon_mb: Optional[float] = None
         self._last_snapshot_time: Optional[datetime] = None
+        # ledger_time from the previous ledgerClosed — used to compute tps
+        # from the actual inter-close interval rather than wall-clock arrival
+        # time (which includes websocket delivery jitter).
+        self._last_ledger_close_time: Optional[int] = None
         self._peak_rss_mb: float = 0.0
         self._peak_anon_mb: float = 0.0
 
@@ -588,11 +592,17 @@ class MonitoringService:
                     f"Monitoring phase - tracking from ledger: {ledger_index} (validated_ledgers: {validated_ledgers})"
                 )
 
-            # Create snapshot for ledger close
+            # Create snapshot for ledger close. ledger_time is rippled's
+            # close time (seconds, rippled epoch) — the delta between
+            # consecutive values is the authoritative inter-close interval.
+            ledger_time = message.get("ledger_time")
             self._create_memory_snapshot(
                 ledger_index=ledger_index,
                 ledger_hash=message.get("ledger_hash"),
                 transaction_count=message.get("txn_count", 0),
+                ledger_close_time=int(ledger_time)
+                if isinstance(ledger_time, (int, float))
+                else None,
             )
 
     def _initialize_binary_result(self, binary_path: str, binary_name: str):
@@ -626,6 +636,7 @@ class MonitoringService:
         self._last_snapshot_rss_mb = None
         self._last_snapshot_anon_mb = None
         self._last_snapshot_time = None
+        self._last_ledger_close_time = None
         self._peak_rss_mb = 0.0
         self._peak_anon_mb = 0.0
         self.latest_breakdown = None
@@ -637,6 +648,7 @@ class MonitoringService:
         ledger_index: Optional[int] = None,
         ledger_hash: Optional[str] = None,
         transaction_count: Optional[int] = None,
+        ledger_close_time: Optional[int] = None,
     ) -> MemorySnapshot:
         """Create a memory snapshot"""
         # Calculate elapsed time
@@ -701,11 +713,21 @@ class MonitoringService:
         if self._last_snapshot_rss_mb is not None:
             rss_delta = rss_mb - self._last_snapshot_rss_mb
             rss_delta_str = f" Δ{rss_delta:+.1f}"
-        if self._last_snapshot_time is not None:
-            secs = (now - self._last_snapshot_time).total_seconds()
-            since_last_str = f" +{secs:.1f}s"
-            if transaction_count and secs > 0:
-                tps_str = f", {transaction_count / secs:.1f} tps"
+
+        # Interval for tps: prefer the gap between consecutive ledger close
+        # times (authoritative, no websocket jitter). Fall back to wall-clock
+        # between snapshots when ledger_close_time isn't available (polling
+        # snapshots, first ledger after a restart, etc).
+        interval_s: Optional[float] = None
+        if ledger_close_time is not None and self._last_ledger_close_time is not None:
+            interval_s = float(ledger_close_time - self._last_ledger_close_time)
+        elif self._last_snapshot_time is not None:
+            interval_s = (now - self._last_snapshot_time).total_seconds()
+
+        if interval_s is not None:
+            since_last_str = f" +{interval_s:.1f}s"
+            if transaction_count and interval_s > 0:
+                tps_str = f", {transaction_count / interval_s:.1f} tps"
         self._peak_rss_mb = max(self._peak_rss_mb, rss_mb)
 
         # Breakdown info (Linux populates all; macOS gives anon via uss when
@@ -742,6 +764,8 @@ class MonitoringService:
         # Record tracking values for next call
         self._last_snapshot_rss_mb = rss_mb
         self._last_snapshot_time = now
+        if ledger_close_time is not None:
+            self._last_ledger_close_time = ledger_close_time
 
         return snapshot
 
