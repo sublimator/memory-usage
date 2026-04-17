@@ -91,19 +91,19 @@ class MemoryGraph(Vertical):
                     # Allow max to grow
                     self.absolute_max = max(self.absolute_max, current_max)
 
-                # Use stable absolute min as the base (never change this)
-                min_val = self.absolute_min
+                # Always anchor the graph at 0 so the absolute scale is
+                # obvious. In attach mode rippled might already hold 6+ GB
+                # and a min-anchored baseline made tiny per-second wiggles
+                # look dramatic; starting from 0 shows the true proportion.
+                min_val = 0.0
                 max_val = max(self.absolute_max, current_max)
 
-                # Ensure we have a reasonable range, but never change min_val
                 range_size = max_val - min_val
                 if range_size < 10:
-                    # If range is too small, extend upward only
-                    max_val = min_val + 10
+                    max_val = 10.0
                 else:
-                    # Add 10% padding on top only (but don't let it affect min_val)
-                    padding = range_size * 0.1
-                    max_val = max_val + padding
+                    # 10% headroom so the tip of the tallest bar isn't clipped
+                    max_val = max_val + range_size * 0.1
 
                 # Update graph display with integrated labels
                 graph_text = self._render_graph(memory_values, min_val, max_val)

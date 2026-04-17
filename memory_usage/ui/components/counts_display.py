@@ -2,21 +2,13 @@
 Counts display widget for showing get_counts diagnostics
 """
 
-from collections import deque
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Dict, Optional
 
 from rich.table import Table
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Static
-
-# Sparkline rendering. We used unicode block elements (▁▂▃▄▅▆▇█) first, but
-# some monospace fonts treat them as East-Asian ambiguous-width (= 2 cells)
-# which causes Rich to wrap the 'Trend' cell across multiple rows. These
-# ASCII chars are guaranteed 1-cell everywhere.
-_SPARK_CHARS = "_.-=+*#@"
-SPARK_WIDTH = 10
 
 
 class CountsDisplay(VerticalScroll):
@@ -44,15 +36,12 @@ class CountsDisplay(VerticalScroll):
                 continue
             entry = self._history.get(key)
             if entry is None:
-                samples: Deque[float] = deque(maxlen=SPARK_WIDTH)
-                samples.append(float(value))
                 self._history[key] = {
                     "first": value,
                     "min": value,
                     "max": value,
                     "last": value,
                     "ever_decreased": False,
-                    "samples": samples,
                 }
                 continue
             if value < entry["last"]:
@@ -60,7 +49,6 @@ class CountsDisplay(VerticalScroll):
             entry["min"] = min(entry["min"], value)
             entry["max"] = max(entry["max"], value)
             entry["last"] = value
-            entry["samples"].append(float(value))
 
     def _min_max(self, key: str):
         entry = self._history.get(key)
@@ -76,32 +64,21 @@ class CountsDisplay(VerticalScroll):
             return False
         return bool(value > entry["first"])
 
-    @staticmethod
-    def _sparkline(samples) -> str:
-        """Render a list of numeric samples as an 8-level unicode sparkline.
+    def _trend_marker(self, key: str) -> str:
+        """Return an all-time trend arrow (↑/↓/→) or '' if no history yet.
 
-        Returns '' for fewer than 2 samples. A flat series renders as dashes
-        so the eye doesn't see fake motion where there is none.
+        Based on last vs first observed value — catches creepers that go up
+        and down but net up over the observation window. Paired with the
+        '++' marker (strict monotonic) for two complementary views.
         """
-        if len(samples) < 2:
-            return ""
-        lo = min(samples)
-        hi = max(samples)
-        span = hi - lo
-        if span == 0:
-            return "-" * len(samples)
-        scale = len(_SPARK_CHARS) - 1
-        return "".join(_SPARK_CHARS[int((s - lo) / span * scale)] for s in samples)
-
-    def _trend_delta(self, key: str):
-        """Return (delta_value, samples_list) for the observed window."""
         entry = self._history.get(key)
         if entry is None:
-            return None, []
-        samples = list(entry["samples"])
-        if len(samples) < 2:
-            return None, samples
-        return samples[-1] - samples[0], samples
+            return ""
+        if entry["last"] > entry["first"]:
+            return "[red]↑[/red]"
+        if entry["last"] < entry["first"]:
+            return "[green]↓[/green]"
+        return "[dim]→[/dim]"
 
     def update_counts(self, counts: Optional[Dict[str, Any]]):
         """Update the counts display with new data"""
@@ -127,24 +104,13 @@ class CountsDisplay(VerticalScroll):
         return f"{value}{suffix}"
 
     def _format_counts(self, counts: Dict[str, Any]) -> Table:
-        """Format counts data into a nice table with min/cur/max/trend/Δ columns."""
+        """Format counts data into a nice table with min/cur/max/trend columns."""
         table = Table(show_header=True, header_style="bold cyan", box=None, expand=True)
         table.add_column("Metric", style="yellow", ratio=3)
         table.add_column("Min", justify="right", style="dim", ratio=1)
         table.add_column("Cur", justify="right", style="green", ratio=1)
         table.add_column("Max", justify="right", style="dim", ratio=1)
-        # min_width keeps Rich from squeezing the sparkline into a narrower
-        # cell when the Metric column wants more space (which was causing
-        # the cell to wrap vertically into 10 stacked rows).
-        table.add_column(
-            "Trend",
-            justify="left",
-            min_width=SPARK_WIDTH,
-            ratio=2,
-            no_wrap=True,
-            overflow="crop",
-        )
-        table.add_column("Δ", justify="right", ratio=1, no_wrap=True, overflow="crop")
+        table.add_column("Trend", justify="center", width=3, no_wrap=True)
 
         # Group related metrics
         sections = {
@@ -186,7 +152,7 @@ class CountsDisplay(VerticalScroll):
 
         for section, metrics in sections.items():
             # Section header (spans the metric column; others stay blank)
-            table.add_row(f"[bold]{section}[/bold]", "", "", "", "", "", style="bold magenta")
+            table.add_row(f"[bold]{section}[/bold]", "", "", "", "", style="bold magenta")
 
             for key, display_name, suffix in metrics:
                 if key not in counts:
@@ -202,34 +168,19 @@ class CountsDisplay(VerticalScroll):
                 else:
                     min_str = ""
                     max_str = ""
-                # Eyeball marker: value has only ever grown since we started
-                # observing. Redundant-ish with the min/max columns but quick
-                # to spot at a glance.
+                # Eyeball marker: strict monotonic grower (never decreased).
                 marker = (
                     " [bold red]++[/bold red]" if self._is_monotonic_growing(key, value) else ""
                 )
-
-                # Sparkline over the last SPARK_WIDTH samples + Δ from the
-                # oldest sample in that window. Coloured so up (red) = concern,
-                # down (green) = reclaiming.
-                delta, samples = self._trend_delta(key)
-                spark = self._sparkline(samples)
-                if delta is None or delta == 0:
-                    delta_str = ""
-                elif delta > 0:
-                    delta_str = f"[red]+{self._format_value(delta, suffix)}[/red]"
-                else:
-                    delta_str = f"[green]{self._format_value(delta, suffix)}[/green]"
                 table.add_row(
                     f"  {display_name}{marker}",
                     min_str,
                     cur_str,
                     max_str,
-                    spark,
-                    delta_str,
+                    self._trend_marker(key),
                 )
 
             # Add spacing between sections
-            table.add_row("", "", "", "", "", "")
+            table.add_row("", "", "", "", "")
 
         return table
