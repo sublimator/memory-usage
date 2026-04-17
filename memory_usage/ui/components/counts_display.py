@@ -11,10 +11,11 @@ from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
-# Sparkline rendering: 8-level block chars + dashed for flat series. SPARK_WIDTH
-# bounds the per-metric ring buffer; at ~2-4s between updates that's ~20-40s of
-# history — enough shape to spot a growth trend at a glance.
-_SPARK_CHARS = "▁▂▃▄▅▆▇█"
+# Sparkline rendering. We used unicode block elements (▁▂▃▄▅▆▇█) first, but
+# some monospace fonts treat them as East-Asian ambiguous-width (= 2 cells)
+# which causes Rich to wrap the 'Trend' cell across multiple rows. These
+# ASCII chars are guaranteed 1-cell everywhere.
+_SPARK_CHARS = "_.-=+*#@"
 SPARK_WIDTH = 10
 
 
@@ -73,7 +74,7 @@ class CountsDisplay(VerticalScroll):
             return False
         if entry["ever_decreased"]:
             return False
-        return value > entry["first"]
+        return bool(value > entry["first"])
 
     @staticmethod
     def _sparkline(samples) -> str:
@@ -88,7 +89,7 @@ class CountsDisplay(VerticalScroll):
         hi = max(samples)
         span = hi - lo
         if span == 0:
-            return "─" * len(samples)
+            return "-" * len(samples)
         scale = len(_SPARK_CHARS) - 1
         return "".join(_SPARK_CHARS[int((s - lo) / span * scale)] for s in samples)
 
@@ -132,9 +133,18 @@ class CountsDisplay(VerticalScroll):
         table.add_column("Min", justify="right", style="dim", ratio=1)
         table.add_column("Cur", justify="right", style="green", ratio=1)
         table.add_column("Max", justify="right", style="dim", ratio=1)
-        # Fixed-width so 10 block chars + border always fit cleanly.
-        table.add_column("Trend", justify="left", width=SPARK_WIDTH, no_wrap=True)
-        table.add_column("Δ", justify="right", ratio=1)
+        # min_width keeps Rich from squeezing the sparkline into a narrower
+        # cell when the Metric column wants more space (which was causing
+        # the cell to wrap vertically into 10 stacked rows).
+        table.add_column(
+            "Trend",
+            justify="left",
+            min_width=SPARK_WIDTH,
+            ratio=2,
+            no_wrap=True,
+            overflow="crop",
+        )
+        table.add_column("Δ", justify="right", ratio=1, no_wrap=True, overflow="crop")
 
         # Group related metrics
         sections = {
