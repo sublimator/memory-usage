@@ -18,10 +18,41 @@ class CountsDisplay(VerticalScroll):
         super().__init__()
         self.border_title = "Internal Diagnostics"
         self._content = Static("Waiting for data...")
+        # Per-key history so we can mark monotonically-growing counters with
+        # '++'. Stores {first_seen, last_seen, ever_decreased} per metric key.
+        self._history: Dict[str, Dict[str, Any]] = {}
 
     def compose(self) -> ComposeResult:
         """Compose the widget"""
         yield self._content
+
+    def reset_history(self) -> None:
+        """Clear the monotonic-growth tracking. Call between binaries."""
+        self._history.clear()
+
+    def _record_history(self, counts: Dict[str, Any]) -> None:
+        for key, value in counts.items():
+            if not isinstance(value, (int, float)):
+                continue
+            entry = self._history.get(key)
+            if entry is None:
+                self._history[key] = {
+                    "first": value,
+                    "last": value,
+                    "ever_decreased": False,
+                }
+                continue
+            if value < entry["last"]:
+                entry["ever_decreased"] = True
+            entry["last"] = value
+
+    def _is_monotonic_growing(self, key: str, value: Any) -> bool:
+        entry = self._history.get(key)
+        if entry is None or not isinstance(value, (int, float)):
+            return False
+        if entry["ever_decreased"]:
+            return False
+        return value > entry["first"]
 
     def update_counts(self, counts: Optional[Dict[str, Any]]):
         """Update the counts display with new data"""
@@ -31,6 +62,8 @@ class CountsDisplay(VerticalScroll):
 
         if "result" in counts:
             counts = counts["result"]
+
+        self._record_history(counts)
 
         # Create a formatted display
         content = self._format_counts(counts)
@@ -97,7 +130,12 @@ class CountsDisplay(VerticalScroll):
                             formatted_value = f"{value:,}{suffix}"
                     else:
                         formatted_value = f"{value}{suffix}"
-                    table.add_row(f"  {display_name}", formatted_value)
+                    # Tag values that have only ever grown since we started
+                    # observing — useful for spotting suspected leaks.
+                    marker = (
+                        " [bold red]++[/bold red]" if self._is_monotonic_growing(key, value) else ""
+                    )
+                    table.add_row(f"  {display_name}{marker}", formatted_value)
 
             # Add spacing between sections
             table.add_row("", "")
