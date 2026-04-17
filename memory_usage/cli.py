@@ -83,14 +83,27 @@ def tail_logs():
         sys.exit(0)
 
 
-def run_diff(args):
-    """Diff two ledger-close snapshots from the resolved session dir."""
+def _resolve_or_exit(args) -> Path:
+    """Shared dir resolution + notice-printing for diff/find/summary.
+
+    On resolver error: prints ``error:`` + the fatal message to stderr and
+    exits 2. On success, prints any non-fatal notice to stderr (so stdout
+    remains pipe-friendly) and returns the path.
+    """
     root = Path(args.output_dir)
-    dir_path, err = resolve_session_dir(root, args.dir)
+    dir_path, err, notice = resolve_session_dir(root, args.dir)
     if err:
         print(f"error: {err}", file=sys.stderr)
         sys.exit(2)
     assert dir_path is not None
+    if notice:
+        print(f"note: {notice}", file=sys.stderr)
+    return dir_path
+
+
+def run_diff(args):
+    """Diff two ledger-close snapshots from the resolved session dir."""
+    dir_path = _resolve_or_exit(args)
     events_path = dir_path / "events.jsonl"
     from_snap, to_snap, first_ledger = load_ledger_snapshots(
         events_path, args.from_ledger, args.to_ledger
@@ -114,12 +127,7 @@ def run_summary(args):
     """One-screen triage view of a session dir."""
     import json as _json
 
-    root = Path(args.output_dir)
-    dir_path, err = resolve_session_dir(root, args.dir)
-    if err:
-        print(f"error: {err}", file=sys.stderr)
-        sys.exit(2)
-    assert dir_path is not None
+    dir_path = _resolve_or_exit(args)
     events_path = dir_path / "events.jsonl"
     meta_path = dir_path / "meta.json"
     meta = {}
@@ -134,12 +142,7 @@ def run_summary(args):
 
 def run_find(args):
     """Scan consecutive ledger-close pairs for delta predicates."""
-    root = Path(args.output_dir)
-    dir_path, err = resolve_session_dir(root, args.dir)
-    if err:
-        print(f"error: {err}", file=sys.stderr)
-        sys.exit(2)
-    assert dir_path is not None
+    dir_path = _resolve_or_exit(args)
     events_path = dir_path / "events.jsonl"
     try:
         threshold = float(args.value)

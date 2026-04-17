@@ -22,49 +22,97 @@ from .process_discovery import find_rippled_processes
 from .session_store import session_dir_name
 
 
+def _session_dirs(root: Path) -> List[Path]:
+    """Subdirs of ``root`` that contain an events.jsonl, sorted newest first."""
+    if not root.exists():
+        return []
+    dirs = [d for d in root.iterdir() if d.is_dir() and (d / "events.jsonl").exists()]
+    dirs.sort(key=lambda d: (d / "events.jsonl").stat().st_mtime, reverse=True)
+    return dirs
+
+
 def resolve_session_dir(
     root: Path,
     explicit: Optional[Path] = None,
-) -> Tuple[Optional[Path], Optional[str]]:
-    """Figure out which session dir to diff.
+) -> Tuple[Optional[Path], Optional[str], Optional[str]]:
+    """Figure out which session dir diff/find/summary should read from.
 
-    Resolution order, matching ``xahaud-monitor attach`` semantics:
+    Returns ``(path, error, notice)``:
 
-    1. ``--dir PATH`` wins if given.
-    2. Otherwise, find running rippled/xahaud processes. If exactly one
-       is running and its ``(pid, create_time)`` session dir exists in
-       ``root``, use it.
-    3. Ambiguous (0 processes, >1 processes, or no matching dir) → return
-       a diagnostic string for the caller to print, and None for the path.
+    - ``path`` is the resolved dir (None on error).
+    - ``error`` is a fatal diagnostic; caller should print + exit.
+    - ``notice`` is a non-fatal info line worth surfacing to the user
+      (e.g. "no rippled running — using latest of N dirs"). Callers
+      print this so the user always knows which dir got picked.
+
+    Resolution order:
+
+    1. ``--dir PATH`` wins.
+    2. Exactly one running rippled/xahaud → its ``(pid, create_time)`` dir.
+    3. Zero running rippleds → newest dir under ``root`` (post-mortem).
+    4. Running process has no matching dir → fall through to newest with
+       a notice explaining the mismatch.
+    5. Multiple running rippleds → error (ambiguous, need --dir).
+    6. Zero running AND zero dirs on disk → error.
     """
     if explicit is not None:
         if not explicit.exists():
-            return None, f"--dir {explicit} does not exist"
+            return None, f"--dir {explicit} does not exist", None
         if not (explicit / "events.jsonl").exists():
-            return None, f"{explicit}/events.jsonl is missing"
-        return explicit, None
+            return None, f"{explicit}/events.jsonl is missing", None
+        return explicit, None, None
 
     procs = find_rippled_processes()
-    if not procs:
-        return None, "no running rippled/xahaud process — pass --dir PATH"
+
     if len(procs) > 1:
         names = ", ".join(f"{p.name}(pid {p.pid})" for p in procs)
-        return None, f"multiple rippled processes running ({names}) — pass --dir PATH"
-
-    proc = procs[0]
-    try:
-        create_time = psutil.Process(proc.pid).create_time()
-    except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-        return None, f"cannot read create_time for pid {proc.pid}: {e}"
-
-    dir_path = root / session_dir_name(proc.name, proc.pid, create_time)
-    if not dir_path.exists() or not (dir_path / "events.jsonl").exists():
-        return None, (
-            f"no session dir for running process {proc.name} pid {proc.pid}\n"
-            f"  expected: {dir_path}\n"
-            f"  (is the monitor currently running on this pid?)"
+        return (
+            None,
+            f"multiple rippled processes running ({names}) — pass --dir PATH",
+            None,
         )
-    return dir_path, None
+
+    if len(procs) == 1:
+        proc = procs[0]
+        try:
+            create_time = psutil.Process(proc.pid).create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+            return None, f"cannot read create_time for pid {proc.pid}: {e}", None
+
+        dir_path = root / session_dir_name(proc.name, proc.pid, create_time)
+        if dir_path.exists() and (dir_path / "events.jsonl").exists():
+            return dir_path, None, None
+        # Running process but monitor hasn't recorded for it — fall through.
+        dirs = _session_dirs(root)
+        if not dirs:
+            return (
+                None,
+                f"running {proc.name} pid {proc.pid} has no session dir at "
+                f"{dir_path}, and no other dirs exist under {root}",
+                None,
+            )
+        return (
+            dirs[0],
+            None,
+            f"running {proc.name} pid {proc.pid} has no monitor dir; "
+            f"using latest of {len(dirs)}: {dirs[0].name}",
+        )
+
+    # Zero running rippleds — post-mortem mode.
+    dirs = _session_dirs(root)
+    if not dirs:
+        return (
+            None,
+            f"no running rippled/xahaud, and no session dirs in {root} — pass --dir PATH",
+            None,
+        )
+    if len(dirs) == 1:
+        return dirs[0], None, f"no rippled running — using {dirs[0].name}"
+    return (
+        dirs[0],
+        None,
+        f"no rippled running — using latest of {len(dirs)}: {dirs[0].name}",
+    )
 
 
 def load_ledger_snapshots(
