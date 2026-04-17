@@ -89,8 +89,8 @@ class BinaryTestResult(BaseModel):
     test_configuration: TestConfiguration
     system_info: SystemInfo
 
-    # Time series data
-    snapshots: List[MemorySnapshot] = []
+    # Time series data now lives in events.jsonl (SessionStore). Summary stats
+    # above are tracked in-memory and written into meta.json.
 
     # Process output (last N lines)
     stdout_tail: List[str] = []  # Last 100 lines

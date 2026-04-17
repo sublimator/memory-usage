@@ -12,6 +12,7 @@ from .process_discovery import (
     find_rippled_processes,
     get_process_by_pid,
 )
+from .session_store import SessionStore, session_dir_name
 
 __all__ = [
     # Parsers
@@ -32,4 +33,7 @@ __all__ = [
     # Memory breakdown
     "MemoryBreakdown",
     "get_memory_breakdown",
+    # Session store (JSONL + meta.json)
+    "SessionStore",
+    "session_dir_name",
 ]
