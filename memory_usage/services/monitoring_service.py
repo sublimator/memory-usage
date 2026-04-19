@@ -994,6 +994,16 @@ class MonitoringService:
         self._peak_anon_mb = 0.0
         self.latest_breakdown = None
         self.latest_heap_sample = None
+        # Crucially reset the monitoring-phase anchor. Otherwise the next
+        # _tick_timer cycle computes monitoring_elapsed = now - (previous
+        # incarnation's sync timestamp), and the Test clock in the status
+        # bar carries over from the dead process (seen as Test: 39m on a
+        # freshly-reattached run).
+        self._monitoring_start_time = None
+        # Heap sampler in-flight gate: if a heap(1) was mid-run when the
+        # old process died, the flag would stay True forever and block
+        # the new incarnation's samples.
+        self._heap_sampling_in_flight = False
         self._heap_sampling_in_flight = False
 
         self.logger.info(f"Initialized result tracking for {binary_name}")
