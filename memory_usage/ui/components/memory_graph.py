@@ -61,6 +61,24 @@ class MemoryGraph(Vertical):
 
         self.last_update = current_time
 
+    def reset(self) -> None:
+        """Drop all history and repaint empty. Called between --reattach
+        incarnations so the graph doesn't carry the dead process's shape.
+        """
+        self.memory_data.clear()
+        self.absolute_min = None
+        self.absolute_max = None
+        self.start_time = time.time()
+        self.last_update = self.start_time
+        self.graph_display.update("")
+        try:
+            self.query_one("#memory-value", Static).update("")
+            self.query_one("#time-start", Static).update("0s")
+            self.query_one("#time-mid", Static).update("0s")
+            self.query_one("#time-end", Static).update("now")
+        except Exception:
+            pass
+
     def hydrate(self, points: list[tuple[float, float]]) -> None:
         """Bulk-load historical (unix_ts, rss_mb) points after a reattach.
 

@@ -114,6 +114,11 @@ class MonitoringService:
         self._hydrate_callback: Optional[
             Callable[[List[Dict[str, Any]], Dict[str, Any]], Awaitable[None]]
         ] = None
+        # Reset hook — fires between --reattach incarnations so widgets
+        # (memory graph points, counts trend history, heap history, status
+        # bar baselines) all look like a fresh launch instead of carrying
+        # the dead process's state into the new pid's session.
+        self._reset_callback: Optional[Callable[[], Awaitable[None]]] = None
 
         # Initialize system info and test config (must be non-None for BinaryTestResult)
         self.system_info: SystemInfo = self._build_system_info()
@@ -132,6 +137,10 @@ class MonitoringService:
         dir, before the new session's events start flowing.
         """
         self._hydrate_callback = callback
+
+    def set_reset_callback(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register a UI reset hook fired between --reattach incarnations."""
+        self._reset_callback = callback
 
     async def start_monitoring(self, binaries: List[str]):
         """Start monitoring all binaries"""
@@ -213,6 +222,14 @@ class MonitoringService:
                 break
             pid, name, binary_path = next_proc
             self.logger.info(f"Reattaching to PID {pid} (new session)")
+            # Wipe UI state before next incarnation so the dashboard reads
+            # as a cold launch — no carry-over trend arrows, graph shape,
+            # or baseline clocks from the dead process.
+            if self._reset_callback is not None:
+                try:
+                    await self._reset_callback()
+                except Exception as e:
+                    self.logger.warning(f"UI reset callback error: {e}")
             await self.state_manager.update_status(f"Reattaching to {name} (PID {pid})")
 
         await self.state_manager.update_test_progress(1, 1)

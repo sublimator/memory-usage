@@ -537,9 +537,47 @@ class MemoryMonitorDashboard(App):
         # during _open_session when a prior events.jsonl exists, so widgets
         # are populated before live updates resume.
         self.monitoring_service.set_hydrate_callback(self._hydrate_ui_from_events)
+        # Reset hook fires between --reattach incarnations: clear all
+        # widget history so the dashboard looks freshly launched when the
+        # new process takes over.
+        self.monitoring_service.set_reset_callback(self._reset_ui_for_new_incarnation)
 
         # Start the test (save worker so we can cancel it on quit)
         self._monitoring_worker = self.run_worker(self._start_monitoring, exclusive=True)
+
+    async def _reset_ui_for_new_incarnation(self) -> None:
+        """Cold-launch look for the dashboard between --reattach cycles.
+
+        Widget-local histories (memory graph points, counts trend, heap
+        sample) are wiped; widgets that derive from ApplicationState
+        repaint empty because we both reset the state AND push ``None``
+        through their update methods. The observer fires branches only
+        when the new value is truthy, so leaving it to state_manager
+        alone wouldn't clear stale panels.
+        """
+        self.memory_graph.reset()
+        self.counts_display.reset_history()
+        self.counts_display_stats.reset_history()
+        self.heap_display.reset_history()
+        # Force widgets that render from state fields back to "no data".
+        for counts in (self.counts_display, self.counts_display_stats):
+            counts.update_counts(None)
+        for jobs in (self.jobs_display, self.jobs_display_stats):
+            jobs.update_jobs(None)
+        for cat in (self.catalogue_display, self.catalogue_display_stats):
+            cat.update_catalogue_status(None)
+        for bd in (self.memory_breakdown_display, self.memory_breakdown_display_stats):
+            bd.update_breakdown(None)
+        for pools in (self.shamap_pools_display, self.shamap_pools_display_stats):
+            pools.update_counts(None)
+        self.heap_display.update_sample(None)
+        # Reset the shared state last so the status bar observer fires
+        # against the empty ApplicationState (blank memory + Total=0 etc).
+        await self.state_manager.reset_state()
+        # Process log viewer is informational — leave it (user may want to
+        # scroll back to see what the dead process said right before it
+        # died). The new process's output tail will append below.
+        self.monitor_log.queue_message(">>> Reset for new incarnation <<<", "bold cyan")
 
     async def _hydrate_ui_from_events(
         self, events: List[Dict[str, Any]], meta: Dict[str, Any]

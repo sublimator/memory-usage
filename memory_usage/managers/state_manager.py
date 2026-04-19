@@ -155,6 +155,18 @@ class StateManager:
             self.state.monitoring_elapsed_seconds = monitoring_elapsed_seconds
             await self._notify_observers()
 
+    async def reset_state(self) -> None:
+        """Swap the ApplicationState for a fresh instance and notify.
+
+        Used between --reattach incarnations: the dashboard should look
+        identical to a cold launch, so we throw away everything rather
+        than trying to selectively clear fields. Observers are fired so
+        the status bar / widgets paint the empty state.
+        """
+        async with self._lock:
+            self.state = ApplicationState()
+            await self._notify_observers()
+
     def get_state(self) -> ApplicationState:
         """Get current state (safe copy)"""
         # For now just return the state, could deep copy if needed
