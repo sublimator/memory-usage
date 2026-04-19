@@ -45,6 +45,12 @@ class Config(BaseSettings):
     # takes seconds on a fat process.
     heap_every_ledger: int = Field(default=0)
 
+    # Attach-only: when set, detach cleanly on process death and poll for
+    # a new rippled with the same binary_path. Each new incarnation gets
+    # its own (pid, create_time) session dir — history across restarts
+    # lives in sibling dirs, not a single stream.
+    reattach_on_death: bool = Field(default=False)
+
     # Binary selection
     specified_binaries: Optional[List[str]] = Field(default=None)
 

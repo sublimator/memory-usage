@@ -169,24 +169,80 @@ class MonitoringService:
         self._monitoring = False
 
     async def start_attach_monitoring(self, pid: int, name: str, binary_path: str):
-        """Start monitoring by attaching to an existing process"""
+        """Start monitoring by attaching to an existing process.
+
+        With ``config.reattach_on_death`` set, this is an outer loop: when
+        the current incarnation exits (process crash, restart, SIGTERM),
+        we poll for another rippled at the same ``binary_path`` and
+        attach to that one. Each incarnation opens a fresh session dir
+        keyed on the new (pid, create_time) tuple — history across
+        restarts lives in sibling dirs, not a single stream.
+        """
         self._monitoring = True
 
-        # Update state
         await self.state_manager.update_test_progress(0, 1)
         await self.state_manager.update_status(f"Attaching to {name}...")
-
         self.logger.info(f"Attaching to process {name} (PID: {pid})")
 
-        try:
-            await self._attach_and_monitor(pid, name, binary_path)
-        except Exception as e:
-            self.logger.error(f"Error monitoring {name}: {e}", exc_info=True)
+        original_binary_path = binary_path
+        incarnation = 0
+        while self._monitoring and not self._shutdown_event.is_set():
+            incarnation += 1
+            try:
+                await self._attach_and_monitor(pid, name, binary_path)
+            except Exception as e:
+                self.logger.error(f"Error monitoring {name}: {e}", exc_info=True)
 
-        # Update final state
+            if not self.config.reattach_on_death:
+                break
+            if self._shutdown_event.is_set():
+                break
+
+            # Wait for a matching rippled to come back. Cleanup already ran
+            # in _attach_and_monitor's finally — fresh state on next cycle.
+            await self.state_manager.update_status(
+                f"Waiting for {Path(original_binary_path).name} to return…"
+            )
+            self.logger.info(
+                f"Incarnation #{incarnation} ended; waiting for a matching "
+                f"rippled at {original_binary_path}"
+            )
+            next_proc = await self._wait_for_matching_process(original_binary_path)
+            if next_proc is None:
+                # shutdown requested during wait
+                break
+            pid, name, binary_path = next_proc
+            self.logger.info(f"Reattaching to PID {pid} (new session)")
+            await self.state_manager.update_status(f"Reattaching to {name} (PID {pid})")
+
         await self.state_manager.update_test_progress(1, 1)
         await self.state_manager.update_status("Monitoring completed")
         self._monitoring = False
+
+    async def _wait_for_matching_process(self, binary_path: str) -> Optional[tuple]:
+        """Poll every 1s until a rippled at ``binary_path`` appears.
+
+        Returns (pid, name, binary_path) on match, or None if shutdown
+        was requested. If multiple matches exist (shouldn't happen often
+        — user usually kills before restart), picks the newest by
+        create_time.
+        """
+        from ..utils.process_discovery import find_rippled_processes
+
+        while not self._shutdown_event.is_set():
+            candidates = [p for p in find_rippled_processes() if p.binary_path == binary_path]
+            if candidates:
+                if len(candidates) == 1:
+                    p = candidates[0]
+                else:
+                    # Pick newest — most likely the one the user just relaunched.
+                    p = max(candidates, key=lambda c: self._get_process_create_time(c.pid))
+                return (p.pid, p.name, p.binary_path)
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+        return None
 
     async def _attach_and_monitor(self, pid: int, name: str, binary_path: str):
         """Attach to an existing process and monitor it"""

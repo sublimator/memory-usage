@@ -278,6 +278,7 @@ def run_attach_mode(args):
         breakdown_interval_seconds=args.breakdown_interval,
         fresh_session=args.fresh,
         heap_every_ledger=args.heap_every_ledger,
+        reattach_on_death=args.reattach,
         # Attach mode specific
         attach_mode=True,
         attach_pid=proc.pid,
@@ -495,6 +496,13 @@ def run():
         metavar="N",
         help="Run macOS heap(1) on every Nth ledger once synced; top-50 classes "
         "land in the snapshot (default: 0 = off, heap suspends target)",
+    )
+    attach_parser.add_argument(
+        "--reattach",
+        action="store_true",
+        help="Keep the dashboard alive when the attached rippled dies; poll "
+        "every 1s for a new rippled with the same binary_path and attach to "
+        "it. Each incarnation gets its own session dir.",
     )
 
     # Diff command — compare two ledger-close snapshots from events.jsonl
