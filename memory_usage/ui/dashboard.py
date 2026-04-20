@@ -285,15 +285,16 @@ class MemoryMonitorDashboard(App):
         layout: vertical;
     }
 
-    /* overflow-y: auto makes the column scroll when the stacked panels
-       together exceed the tab height, rather than each panel having a
-       fixed fraction and wasting space on short panels / forcing scroll
-       on long ones. */
+    /* overflow-y: scroll (not auto) so the scrollbar gutter is always
+       reserved. With 'auto' the gutter appeared/disappeared as Job Types
+       row count fluctuated across the viewport threshold, which
+       reflowed every sibling table's column widths tick-to-tick —
+       visually horrific. Always-on gutter costs 1 col but stops flicker. */
     #stats-right {
         width: 1fr;
         height: 100%;
         layout: vertical;
-        overflow-y: auto;
+        overflow-y: scroll;
     }
 
     /* Left column: single CountsDisplay fills the full column height. */
