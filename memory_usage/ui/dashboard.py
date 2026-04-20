@@ -428,12 +428,13 @@ class MemoryMonitorDashboard(App):
         Binding("space", "pause", "Pause/Resume"),
         Binding("s", "stop_process", "Stop rippled"),
         Binding("g", "toggle_catalogue", "Catalogue"),
-        # Numeric shortcuts: 1=Overview, 2=Stats, 3=Heap. Kept out of the
-        # footer (show=False) so the footer stays uncluttered — docs are
-        # in the README / --help.
-        Binding("1", "show_tab('tab-overview')", "Overview", show=False),
-        Binding("2", "show_tab('tab-stats')", "Stats", show=False),
-        Binding("3", "show_tab('tab-heap')", "Heap", show=False),
+        # Numeric shortcuts: 1=Overview, 2=Stats, 3=Heap. priority=True so
+        # focused children (log viewers, scroll panes) can't swallow them
+        # or bounce focus back mid-switch. show=False keeps the footer
+        # uncluttered.
+        Binding("1", "show_tab('tab-overview')", "Overview", show=False, priority=True),
+        Binding("2", "show_tab('tab-stats')", "Stats", show=False, priority=True),
+        Binding("3", "show_tab('tab-heap')", "Heap", show=False, priority=True),
     ]
 
     @inject
