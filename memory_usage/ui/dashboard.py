@@ -894,9 +894,19 @@ class MemoryMonitorDashboard(App):
             await self.state_manager.update_status("Stopped by user")
 
     def action_show_tab(self, tab_id: str) -> None:
-        """Switch to a tab by id (bound to 1/2/3)."""
+        """Switch to a tab by id (bound to 1/2/3).
+
+        Clear focus as the first step — between a fresh-attach and
+        Textual auto-focusing the new widget tree, a scroll pane can
+        grab focus and interfere with subsequent key routing. Setting
+        focus to None here means the binding works every time.
+        """
         from textual.widgets import TabbedContent
 
+        try:
+            self.set_focus(None)
+        except Exception:
+            pass
         try:
             self.query_one(TabbedContent).active = tab_id
         except Exception:
