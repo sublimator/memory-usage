@@ -428,6 +428,12 @@ class MemoryMonitorDashboard(App):
         Binding("space", "pause", "Pause/Resume"),
         Binding("s", "stop_process", "Stop rippled"),
         Binding("g", "toggle_catalogue", "Catalogue"),
+        # Numeric shortcuts: 1=Overview, 2=Stats, 3=Heap. Kept out of the
+        # footer (show=False) so the footer stays uncluttered — docs are
+        # in the README / --help.
+        Binding("1", "show_tab('tab-overview')", "Overview", show=False),
+        Binding("2", "show_tab('tab-stats')", "Stats", show=False),
+        Binding("3", "show_tab('tab-heap')", "Heap", show=False),
     ]
 
     @inject
@@ -873,6 +879,15 @@ class MemoryMonitorDashboard(App):
             self.monitor_log.queue_message("Stopping rippled process...", "yellow")
             await self.monitoring_service.stop_monitoring()
             await self.state_manager.update_status("Stopped by user")
+
+    def action_show_tab(self, tab_id: str) -> None:
+        """Switch to a tab by id (bound to 1/2/3)."""
+        from textual.widgets import TabbedContent
+
+        try:
+            self.query_one(TabbedContent).active = tab_id
+        except Exception:
+            pass
 
     def action_toggle_catalogue(self) -> None:
         """Show/hide the Xahau catalogue status panel across both tabs.
