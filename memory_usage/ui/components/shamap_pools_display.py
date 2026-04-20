@@ -253,16 +253,21 @@ class SHAMapPoolsDisplay(VerticalScroll):
         # accepted). Earlier sections (pools / locks / sources) only use
         # the first two or three; leaving the tail columns empty is cheap
         # and keeps everything vertically aligned.
-        table = Table(show_header=False, box=None, expand=False, pad_edge=False)
-        table.add_column(style="yellow", no_wrap=True)
-        table.add_column(justify="right", style="green", no_wrap=True)
-        table.add_column(justify="right", style="dim", no_wrap=True)
-        table.add_column(justify="right", style="dim", no_wrap=True)
-        table.add_column(justify="right", style="dim", no_wrap=True)
-        # Extra column for per-round Δ. Most rows leave it empty; filled
-        # only for the count-style metrics in shamap_sources + inbound
-        # acquire where the tick-to-tick delta is diagnostic.
-        table.add_column(justify="right", no_wrap=True)
+        # expand=True so the table fills the widget width instead of
+        # hugging content on the X axis — without it the outer panel
+        # appeared to "breathe" as row widths changed tick-to-tick.
+        table = Table(show_header=False, box=None, expand=True, pad_edge=False)
+        # Metric name column takes the slack via ratio; fixed/no_wrap
+        # data columns keep their widths stable so the whole table
+        # doesn't jitter when a single number gains/loses a digit.
+        table.add_column(style="yellow", ratio=3, no_wrap=True)
+        table.add_column(justify="right", style="green", no_wrap=True, min_width=12)
+        table.add_column(justify="right", style="dim", no_wrap=True, min_width=8)
+        table.add_column(justify="right", style="dim", no_wrap=True, min_width=8)
+        table.add_column(justify="right", style="dim", no_wrap=True, min_width=8)
+        # Per-round Δ. min_width reserves space even when the column
+        # is empty on most rows, so the layout stays put.
+        table.add_column(justify="right", no_wrap=True, min_width=10)
 
         if pools:
             total = pools.get("_total") or {}
