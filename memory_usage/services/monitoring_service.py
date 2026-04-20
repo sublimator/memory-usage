@@ -1103,21 +1103,36 @@ class MonitoringService:
 
         # Interval for tps: prefer the gap between consecutive ledger close
         # times (authoritative, no websocket jitter). Fall back to wall-clock
-        # between snapshots when ledger_close_time isn't available (polling
-        # snapshots, first ledger after a restart, etc). Provenance is
-        # flagged in the log so "+9.0s" from rippled vs "+9.0s" from a
-        # delayed WS delivery are distinguishable at a glance.
+        # between snapshots when ledger_close_time isn't available.
+        # Provenance flags:
+        #   ©  interval is from rippled's ledger_close_time (canonical)
+        #   ~  wall-clock fallback (no close_time on one of the ends)
+        # When close-time and receive-time disagree by > 0.5s we also log
+        # the receive-time delta so "node is slow" (rx≈close) and "WS
+        # delivery lag" (rx≫close) can be told apart at a glance.
         interval_s: Optional[float] = None
-        interval_src = ""  # © = close-time (canonical); ~ = wall-clock fallback
+        interval_src = ""
+        rx_interval_s: Optional[float] = None
+        if self._last_snapshot_time is not None:
+            rx_interval_s = (now - self._last_snapshot_time).total_seconds()
         if ledger_close_time is not None and self._last_ledger_close_time is not None:
             interval_s = float(ledger_close_time - self._last_ledger_close_time)
             interval_src = "©"
-        elif self._last_snapshot_time is not None:
-            interval_s = (now - self._last_snapshot_time).total_seconds()
+        elif rx_interval_s is not None:
+            interval_s = rx_interval_s
             interval_src = "~"
 
         if interval_s is not None:
             since_last_str = f" +{interval_s:.1f}s{interval_src}"
+            # Only annotate with the receive-time delta when it's
+            # meaningfully different from close-time — suppresses noise on
+            # the common case where both agree to within delivery jitter.
+            if (
+                interval_src == "©"
+                and rx_interval_s is not None
+                and abs(rx_interval_s - interval_s) > 0.5
+            ):
+                since_last_str += f" (rx +{rx_interval_s:.1f}s)"
             if transaction_count and interval_s > 0:
                 tps_str = f", {transaction_count / interval_s:.1f} tps"
         self._peak_rss_mb = max(self._peak_rss_mb, rss_mb)
