@@ -872,6 +872,20 @@ class MonitoringService:
         # Initialize meta.json on first session; subsequent sessions just
         # append their entry.
         existing_meta = store.load_meta()
+        # Rehydrate peaks from the meta summary so the "peak NMB" in the
+        # per-ledger log keeps tracking cross-session maxima — otherwise
+        # a reattach would start the peak at 0 and the log would under-
+        # report until the current session climbed back to the prior
+        # level. Only adopts the stored peak if it's larger than what's
+        # in memory (which is 0 at this point for a fresh session).
+        if existing_meta is not None:
+            summary = existing_meta.get("summary") or {}
+            prev_peak = summary.get("peak_rss_mb")
+            if isinstance(prev_peak, (int, float)) and prev_peak > self._peak_rss_mb:
+                self._peak_rss_mb = float(prev_peak)
+            prev_anon_peak = summary.get("peak_anon_mb")
+            if isinstance(prev_anon_peak, (int, float)) and prev_anon_peak > self._peak_anon_mb:
+                self._peak_anon_mb = float(prev_anon_peak)
         if existing_meta is None:
             binary_size_mb = 0.0
             try:
@@ -948,7 +962,9 @@ class MonitoringService:
             meta = store.load_meta() or {}
             summary = meta.setdefault("summary", {})
             prev_peak = summary.get("peak_rss_mb") or 0.0
-            summary["peak_rss_mb"] = max(float(prev_peak), self._session_peak_rss_mb)
+            summary["peak_rss_mb"] = max(float(prev_peak), self._peak_rss_mb)
+            prev_anon_peak = summary.get("peak_anon_mb") or 0.0
+            summary["peak_anon_mb"] = max(float(prev_anon_peak), self._peak_anon_mb)
             if self._current_result and self._current_result.final_memory_rss_mb:
                 summary["final_rss_mb"] = self._current_result.final_memory_rss_mb
             store.save_meta(meta)
