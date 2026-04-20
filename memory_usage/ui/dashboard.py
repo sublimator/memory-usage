@@ -557,6 +557,13 @@ class MemoryMonitorDashboard(App):
         # new process takes over.
         self.monitoring_service.set_reset_callback(self._reset_ui_for_new_incarnation)
 
+        # Clear focus on mount. No focusable child is a safer initial
+        # state than Textual's default "first focusable child" which
+        # tended to be a log viewer (now non-focusable anyway, but
+        # defensive). App-level priority bindings (1/2/3, q, ctrl+c)
+        # route without issue when nothing is focused.
+        self.set_focus(None)
+
         # Start the test (save worker so we can cancel it on quit)
         self._monitoring_worker = self.run_worker(self._start_monitoring, exclusive=True)
 
@@ -589,6 +596,10 @@ class MemoryMonitorDashboard(App):
         # Reset the shared state last so the status bar observer fires
         # against the empty ApplicationState (blank memory + Total=0 etc).
         await self.state_manager.reset_state()
+        # Drop focus so the numeric tab shortcuts resume working cleanly
+        # on the new incarnation — reattach can leave focus on a widget
+        # that then intercepts keys until the user clicks.
+        self.set_focus(None)
         # Process log viewer is informational — leave it (user may want to
         # scroll back to see what the dead process said right before it
         # died). The new process's output tail will append below.

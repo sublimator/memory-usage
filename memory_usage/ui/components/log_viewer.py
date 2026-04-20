@@ -20,8 +20,14 @@ class QueuedLogViewer(RichLog):
         self.title_style = title_style
         self.message_queue: queue.Queue[Tuple[str, Optional[str]]] = queue.Queue()
         self._initialized = False
-        # Enable mouse support for selection
-        self.can_focus = True
+        # Stay out of the keyboard focus chain. The log viewers are
+        # read-only surfaces — user interacts via mouse (selection,
+        # wheel). With can_focus=True the initial focus landed here
+        # on mount and RichLog's scroll handlers intercepted the
+        # top-level 1/2/3 numeric bindings until the user clicked a
+        # tab. can_focus=False removes them from focus entirely;
+        # mouse selection + scroll still work.
+        self.can_focus = False
 
     def on_mount(self):
         """Initialize the log when mounted"""
