@@ -88,11 +88,16 @@ class SHAMapPoolsDisplay(VerticalScroll):
         sources: Optional[Dict[str, Any]],
         acquire: Optional[Dict[str, Any]],
     ) -> Table:
-        # Three columns so bytes and chunks line up across all rows. The
-        # aggregate/locks rows leave the third column empty.
+        # Five columns because the Inbound acquire section now needs four
+        # data columns (hit/miss, reused/spawned, peer pkts/nodes, wire
+        # accepted). Earlier sections (pools / locks / sources) only use
+        # the first two or three; leaving the tail columns empty is cheap
+        # and keeps everything vertically aligned.
         table = Table(show_header=False, box=None, expand=False, pad_edge=False)
         table.add_column(style="yellow", no_wrap=True)
         table.add_column(justify="right", style="green", no_wrap=True)
+        table.add_column(justify="right", style="dim", no_wrap=True)
+        table.add_column(justify="right", style="dim", no_wrap=True)
         table.add_column(justify="right", style="dim", no_wrap=True)
 
         if pools:
@@ -204,13 +209,15 @@ class SHAMapPoolsDisplay(VerticalScroll):
 
         if acquire:
             if pools or locks or sources:
-                table.add_row("", "", "")
-            table.add_row("[bold magenta]Inbound acquire[/bold magenta]", "", "")
-            # Column header so the third column's numbers have context —
-            # without it users reasonably ask "what does r/s mean?".
-            table.add_row("", "hit/miss", "reused/spawned")
-            # The three sub-trees (generic / consensus / history) share a
-            # schema; compact into one row each so the panel stays scannable.
+                table.add_row("", "", "", "", "")
+            table.add_row("[bold magenta]Inbound acquire[/bold magenta]", "", "", "", "")
+            # Column header. Four data columns per kind:
+            #   hit/miss        = ledgermaster hit vs miss (pct of hits)
+            #   reused/spawned  = after a LM miss, joined existing vs spawned new
+            #   pkts/nodes      = peer TMLedgerData packets + total nodes() entries
+            #                     delivered to this kind's active inbound ledgers
+            #   wire accepted   = non-root SHAMap nodes accepted from that traffic
+            table.add_row("", "hit/miss", "reused/spawned", "pkts/nodes", "wire accepted")
             for kind in ("generic", "consensus", "history"):
                 sub = acquire.get(kind)
                 if not isinstance(sub, dict):
@@ -219,27 +226,63 @@ class SHAMapPoolsDisplay(VerticalScroll):
                 lm_miss = _to_int(sub.get("ledgermaster_miss"))
                 reused = _to_int(sub.get("reused_existing_inbound"))
                 spawned = _to_int(sub.get("spawned_new_inbound"))
+                peer_pkts = _to_int(sub.get("peer_packets"))
+                peer_nodes = _to_int(sub.get("peer_nodes"))
+                wire_accepted = _to_int(sub.get("wire_nodes_accepted"))
                 lm_total = lm_hit + lm_miss
                 lm_pct = f" ({lm_hit / lm_total * 100:.1f}%)" if lm_total else ""
+                pkts_nodes = (
+                    f"{_format_count(peer_pkts)}/{_format_count(peer_nodes)}"
+                    if peer_pkts or peer_nodes
+                    else ""
+                )
                 table.add_row(
                     f"  {kind}",
                     f"{_format_count(lm_hit)}/{_format_count(lm_miss)}{lm_pct}",
                     f"{_format_count(reused)}/{_format_count(spawned)}",
+                    pkts_nodes,
+                    _format_count(wire_accepted) if wire_accepted else "",
                 )
+
+            # Global-scope counters below the per-kind block. Async and
+            # stale numbers are separate concerns — broken out so they
+            # don't clutter the per-kind row but still live on the panel.
             async_hit = _to_int(acquire.get("async_ledgermaster_hit"))
             async_skip = _to_int(acquire.get("async_pending_skip"))
-            peer_pkts = _to_int(acquire.get("peer_packets"))
-            peer_nodes = _to_int(acquire.get("peer_nodes"))
+            total_pkts = _to_int(acquire.get("peer_packets"))
+            total_nodes = _to_int(acquire.get("peer_nodes"))
+            stale_pkts = _to_int(acquire.get("stale_peer_packets"))
+            stale_nodes = _to_int(acquire.get("stale_peer_nodes"))
             if async_hit or async_skip:
                 table.add_row(
-                    "  Async hit/skip",
+                    "  async hit/skip",
                     f"{_format_count(async_hit)}/{_format_count(async_skip)}",
                     "",
+                    "",
+                    "",
                 )
-            if peer_pkts or peer_nodes:
+            if total_pkts or total_nodes or stale_pkts or stale_nodes:
+                # Format 'live / stale' so the ratio of wasted traffic is
+                # scannable — high stale% means peers are delivering for
+                # acquires that already finished / aborted.
+                stale_pkt_pct = (
+                    f" ({stale_pkts / total_pkts * 100:.0f}% stale)" if total_pkts else ""
+                )
+                stale_node_pct = (
+                    f" ({stale_nodes / total_nodes * 100:.0f}% stale)" if total_nodes else ""
+                )
                 table.add_row(
-                    "  Peer packets/nodes",
-                    f"{_format_count(peer_pkts)}/{_format_count(peer_nodes)}",
+                    "  peer packets (stale)",
+                    f"{_format_count(total_pkts)}",
+                    f"{_format_count(stale_pkts)}{stale_pkt_pct}",
+                    "",
+                    "",
+                )
+                table.add_row(
+                    "  peer nodes (stale)",
+                    f"{_format_count(total_nodes)}",
+                    f"{_format_count(stale_nodes)}{stale_node_pct}",
+                    "",
                     "",
                 )
 
