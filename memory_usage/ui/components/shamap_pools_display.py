@@ -117,7 +117,14 @@ class SHAMapPoolsDisplay(VerticalScroll):
         else:
             entry["deltas"].append(0)
         entry["last"] = value
-        entry["last_delta"] = delta
+        # Keep the last *non-zero* delta on screen so the indicator
+        # doesn't flicker between ledger-close ticks (counts_update
+        # polls fire ~2s, ledger closes ~4s, so roughly every other
+        # poll had no change and blanked the column). Zero-movement
+        # polls leave the displayed delta alone; the next real move
+        # overwrites it.
+        if delta != 0:
+            entry["last_delta"] = delta
         return delta
 
     def _trend(self, key: str) -> str:
