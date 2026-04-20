@@ -285,25 +285,32 @@ class MemoryMonitorDashboard(App):
         layout: vertical;
     }
 
+    /* overflow-y: auto makes the column scroll when the stacked panels
+       together exceed the tab height, rather than each panel having a
+       fixed fraction and wasting space on short panels / forcing scroll
+       on long ones. */
     #stats-right {
         width: 1fr;
         height: 100%;
         layout: vertical;
+        overflow-y: auto;
     }
 
-    /* Inside the stats tab we want the same widget classes to occupy the
-       full available height — override the Overview-tab heights. The
-       counts widget gets all of the left column; right column splits
-       evenly across breakdown / pools / jobs / catalogue. */
+    /* Left column: single CountsDisplay fills the full column height. */
     #stats-left CountsDisplay {
         height: 100%;
     }
 
+    /* Right column panels hug their content. min-height keeps even an
+       empty panel legible; max-height caps oversized ones so no single
+       panel can monopolise the viewport. */
     #stats-right MemoryBreakdownDisplay,
     #stats-right SHAMapPoolsDisplay,
     #stats-right JobsDisplay,
     #stats-right CatalogueStatusDisplay {
-        height: 1fr;
+        height: auto;
+        min-height: 6;
+        max-height: 60;
     }
 
     /* Heap tab: single widget fills the whole pane. */
