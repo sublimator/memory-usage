@@ -15,13 +15,20 @@ All values arrive as u64-encoded strings to avoid float64 precision loss;
 _to_int handles both str and numeric inputs.
 """
 
-from typing import Any, Dict, Optional
+from collections import deque
+from typing import Any, Deque, Dict, Optional
 
 from rich.table import Table
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Static
+
+# Trend-detection knobs mirror the ones in CountsDisplay: a move-majority
+# over a rolling window of step-deltas, with latching so the arrow
+# doesn't blink in and out on every ledger close.
+_TREND_WINDOW = 30
+_TREND_MAJORITY = 0.6
 
 
 def _to_int(value: Any) -> int:
@@ -49,6 +56,19 @@ def _format_count(n: int) -> str:
     return f"{n}"
 
 
+def _format_delta(n: int) -> str:
+    """Signed compact delta for inline rendering: +12, -3.4k, +1.2M."""
+    if n == 0:
+        return ""
+    sign = "+" if n > 0 else "-"
+    absn = abs(n)
+    if absn >= 1_000_000:
+        return f"{sign}{absn / 1_000_000:.2f}M"
+    if absn >= 1_000:
+        return f"{sign}{absn / 1_000:.1f}k"
+    return f"{sign}{absn}"
+
+
 class SHAMapPoolsDisplay(VerticalScroll):
     """TaggedPointer pool totals + TreeNodeCache lock contention, if emitted."""
 
@@ -56,9 +76,118 @@ class SHAMapPoolsDisplay(VerticalScroll):
         super().__init__()
         self.border_title = "SHAMap Internals"
         self._content = Static("Waiting for data...")
+        # Per-metric trend + delta history. Mirrors CountsDisplay._history
+        # so the user gets the same vocabulary across panels: ++ for
+        # strictly-monotonic growth, ↑/↓ for up/down trend in a rolling
+        # window, and a per-round ±N showing what actually moved this
+        # ledger. Key is a dotted path like "shamap_sources.pack_hit" or
+        # "inbound_acquire.generic.ledgermaster_miss".
+        self._history: Dict[str, Dict[str, Any]] = {}
+
+    def reset_history(self) -> None:
+        self._history.clear()
 
     def compose(self) -> ComposeResult:
         yield self._content
+
+    def _record(self, key: str, value: int) -> int:
+        """Track first/last/ever_decreased/deltas. Returns this-round delta.
+
+        On the first observation we seed state and return 0 — a delta
+        against "no prior value" is meaningless. Subsequent calls compute
+        value - last and update the rolling window used by _trend().
+        """
+        entry = self._history.get(key)
+        if entry is None:
+            self._history[key] = {
+                "first": value,
+                "last": value,
+                "ever_decreased": False,
+                "deltas": deque(maxlen=_TREND_WINDOW),
+                "trend": None,  # "up" | "down" | None, latched
+                "last_delta": 0,
+            }
+            return 0
+        delta = int(value - entry["last"])
+        if delta > 0:
+            entry["deltas"].append(1)
+        elif delta < 0:
+            entry["deltas"].append(-1)
+            entry["ever_decreased"] = True
+        else:
+            entry["deltas"].append(0)
+        entry["last"] = value
+        entry["last_delta"] = delta
+        return delta
+
+    def _trend(self, key: str) -> str:
+        """Rolling up/down arrow with latching — see CountsDisplay for
+        the same logic. Returns rich-markup string or ''."""
+        entry = self._history.get(key)
+        if entry is None:
+            return ""
+        deltas: Deque[int] = entry["deltas"]
+        if len(deltas) < 5:
+            return ""
+        ups = sum(1 for d in deltas if d > 0)
+        downs = sum(1 for d in deltas if d < 0)
+        moves = ups + downs
+        if moves > 0:
+            if ups / moves >= _TREND_MAJORITY:
+                entry["trend"] = "up"
+            elif downs / moves >= _TREND_MAJORITY:
+                entry["trend"] = "down"
+        trend = entry.get("trend")
+        if trend == "up":
+            return "[bold red]↑[/bold red]"
+        if trend == "down":
+            return "[bold green]↓[/bold green]"
+        return ""
+
+    def _monotonic(self, key: str) -> str:
+        """'++' (red) if the key has only grown since first observation."""
+        entry = self._history.get(key)
+        if entry is None:
+            return ""
+        if entry["ever_decreased"]:
+            return ""
+        if entry["last"] <= entry["first"]:
+            return ""
+        return "[bold red]++[/bold red]"
+
+    def _markers(self, key: str) -> str:
+        """Combined trend + monotonic marker string, space-separated."""
+        parts = [p for p in (self._trend(key), self._monotonic(key)) if p]
+        return " ".join(parts)
+
+    def _delta_str(self, key: str) -> str:
+        """Per-round delta with +/- sign. Coloured red for growth, green
+        for shrink, dim for no change (empty)."""
+        entry = self._history.get(key)
+        if entry is None:
+            return ""
+        delta = entry.get("last_delta", 0)
+        if delta == 0:
+            return ""
+        colour = "red" if delta > 0 else "green"
+        return f"[{colour}]{_format_delta(delta)}[/{colour}]"
+
+    def _marked_name(self, name: str, key: str) -> str:
+        """Append trend+monotonic markers to a metric name, one space between."""
+        m = self._markers(key)
+        return f"{name} {m}" if m else name
+
+    def _pair_delta(self, key_a: str, key_b: str) -> str:
+        """Compact paired delta like '+12/+45'. Empty if both are zero."""
+        a = self._history.get(key_a, {}).get("last_delta", 0)
+        b = self._history.get(key_b, {}).get("last_delta", 0)
+        if a == 0 and b == 0:
+            return ""
+        colour_a = "red" if a > 0 else ("green" if a < 0 else "dim")
+        colour_b = "red" if b > 0 else ("green" if b < 0 else "dim")
+        sa = _format_delta(a) or "0"
+        sb = _format_delta(b) or "0"
+        return f"[{colour_a}]{sa}[/{colour_a}]/[{colour_b}]{sb}[/{colour_b}]"
 
     def update_counts(self, counts: Optional[Dict[str, Any]]):
         if not counts:
@@ -81,7 +210,29 @@ class SHAMapPoolsDisplay(VerticalScroll):
             )
             return
 
+        # Record history BEFORE rendering so _markers/_delta_str in the
+        # row builders have the freshly-updated values to read from.
+        self._record_all(sources, acquire)
         self._content.update(self._format(pools, locks, sources, acquire))
+
+    def _record_all(
+        self,
+        sources: Optional[Dict[str, Any]],
+        acquire: Optional[Dict[str, Any]],
+    ) -> None:
+        """Seed history for every numeric leaf in the sections that
+        render markers. Pools/locks are volume-style gauges where the
+        trend vocabulary is less informative, so we skip them."""
+        if isinstance(sources, dict):
+            for k, v in sources.items():
+                self._record(f"sources.{k}", _to_int(v))
+        if isinstance(acquire, dict):
+            for k, v in acquire.items():
+                if isinstance(v, dict):
+                    for kk, vv in v.items():
+                        self._record(f"acquire.{k}.{kk}", _to_int(vv))
+                else:
+                    self._record(f"acquire.{k}", _to_int(v))
 
     def _format(
         self,
@@ -101,6 +252,10 @@ class SHAMapPoolsDisplay(VerticalScroll):
         table.add_column(justify="right", style="dim", no_wrap=True)
         table.add_column(justify="right", style="dim", no_wrap=True)
         table.add_column(justify="right", style="dim", no_wrap=True)
+        # Extra column for per-round Δ. Most rows leave it empty; filled
+        # only for the count-style metrics in shamap_sources + inbound
+        # acquire where the tick-to-tick delta is diagnostic.
+        table.add_column(justify="right", no_wrap=True)
 
         if pools:
             total = pools.get("_total") or {}
@@ -191,31 +346,90 @@ class SHAMapPoolsDisplay(VerticalScroll):
             db_pct = f" ({db_hit / db_total * 100:.1f}%)" if db_total else ""
 
             table.add_row("[bold magenta]SHAMap sources[/bold magenta]", "", "")
+            # Primary-metric pairs: show markers on the "hit" side, Δ
+            # collapses both in a compact +h/+m form.
             table.add_row(
-                "  Tree cache hit/miss",
+                self._marked_name("  Tree cache hit/miss", "sources.tree_cache_hit"),
                 f"{_format_count(tree_hit)}/{_format_count(tree_miss)}{tree_pct}",
                 "",
+                "",
+                "",
+                self._pair_delta("sources.tree_cache_hit", "sources.tree_cache_miss"),
             )
             table.add_row(
-                "  DB hit/miss",
+                self._marked_name("  DB hit/miss", "sources.db_miss"),
                 f"{_format_count(db_hit)}/{_format_count(db_miss)}{db_pct}",
                 "",
+                "",
+                "",
+                self._pair_delta("sources.db_hit", "sources.db_miss"),
             )
-            table.add_row("  Pack hit", _format_count(pack_hit), "")
-            table.add_row("  Filter hit", _format_count(filter_hit), "")
-            table.add_row("  Wire nodes accepted", _format_count(wire), "")
-            if primed_origin:
-                table.add_row("  Primed-origin tagged", _format_count(primed_origin), "")
-            if locally_built:
-                table.add_row("  Locally built finalized", _format_count(locally_built), "")
             table.add_row(
-                "  Canonical fresh/dedup", f"{_format_count(fresh)}/{_format_count(dedup)}", ""
+                self._marked_name("  Pack hit", "sources.pack_hit"),
+                _format_count(pack_hit),
+                "",
+                "",
+                "",
+                self._delta_str("sources.pack_hit"),
+            )
+            table.add_row(
+                self._marked_name("  Filter hit", "sources.filter_hit"),
+                _format_count(filter_hit),
+                "",
+                "",
+                "",
+                self._delta_str("sources.filter_hit"),
+            )
+            table.add_row(
+                self._marked_name("  Wire nodes accepted", "sources.wire_node_accepted"),
+                _format_count(wire),
+                "",
+                "",
+                "",
+                self._delta_str("sources.wire_node_accepted"),
+            )
+            if primed_origin:
+                table.add_row(
+                    self._marked_name("  Primed-origin tagged", "sources.primed_origin_tagged"),
+                    _format_count(primed_origin),
+                    "",
+                    "",
+                    "",
+                    self._delta_str("sources.primed_origin_tagged"),
+                )
+            if locally_built:
+                table.add_row(
+                    self._marked_name(
+                        "  Locally built finalized", "sources.locally_built_finalized"
+                    ),
+                    _format_count(locally_built),
+                    "",
+                    "",
+                    "",
+                    self._delta_str("sources.locally_built_finalized"),
+                )
+            table.add_row(
+                self._marked_name("  Canonical fresh/dedup", "sources.canonical_fresh"),
+                f"{_format_count(fresh)}/{_format_count(dedup)}",
+                "",
+                "",
+                "",
+                self._pair_delta("sources.canonical_fresh", "sources.canonical_dedup"),
             )
             if merge_nodes or merge_children:
                 table.add_row(
-                    "  Canonical merges (nodes/children)",
+                    self._marked_name(
+                        "  Canonical merges (nodes/children)",
+                        "sources.canonical_merge_nodes",
+                    ),
                     f"{_format_count(merge_nodes)}/{_format_count(merge_children)}",
                     "",
+                    "",
+                    "",
+                    self._pair_delta(
+                        "sources.canonical_merge_nodes",
+                        "sources.canonical_merge_children",
+                    ),
                 )
             # Enrichment counters — first-time transitions where a cached
             # canonical inner gained an enrichment bit. wire and local are
@@ -225,14 +439,23 @@ class SHAMapPoolsDisplay(VerticalScroll):
             # looking like a sum.
             if enr_any or enr_wire or enr_local:
                 table.add_row(
-                    "  Enriched (unique nodes)",
+                    self._marked_name("  Enriched (unique nodes)", "sources.enriched_any_flagged"),
                     _format_count(enr_any),
                     "",
+                    "",
+                    "",
+                    self._delta_str("sources.enriched_any_flagged"),
                 )
                 table.add_row(
                     "    from wire / local",
                     f"{_format_count(enr_wire)} / {_format_count(enr_local)}",
                     "",
+                    "",
+                    "",
+                    self._pair_delta(
+                        "sources.enriched_from_wire_flagged",
+                        "sources.enriched_from_local_flagged",
+                    ),
                 )
 
         if acquire:
@@ -264,12 +487,18 @@ class SHAMapPoolsDisplay(VerticalScroll):
                     if peer_pkts or peer_nodes
                     else ""
                 )
+                # Per-kind row: use the wire_nodes_accepted path as the
+                # primary trend target since it's the "actually useful
+                # work happening" signal for this kind. Per-round Δ in
+                # the trailing column uses the same primary.
+                key_prefix = f"acquire.{kind}"
                 table.add_row(
-                    f"  {kind}",
+                    self._marked_name(f"  {kind}", f"{key_prefix}.wire_nodes_accepted"),
                     f"{_format_count(lm_hit)}/{_format_count(lm_miss)}{lm_pct}",
                     f"{_format_count(reused)}/{_format_count(spawned)}",
                     pkts_nodes,
                     _format_count(wire_accepted) if wire_accepted else "",
+                    self._delta_str(f"{key_prefix}.wire_nodes_accepted"),
                 )
 
             # Global-scope counters below the per-kind block. Async and
@@ -283,11 +512,15 @@ class SHAMapPoolsDisplay(VerticalScroll):
             stale_nodes = _to_int(acquire.get("stale_peer_nodes"))
             if async_hit or async_skip:
                 table.add_row(
-                    "  async hit/skip",
+                    self._marked_name("  async hit/skip", "acquire.async_ledgermaster_hit"),
                     f"{_format_count(async_hit)}/{_format_count(async_skip)}",
                     "",
                     "",
                     "",
+                    self._pair_delta(
+                        "acquire.async_ledgermaster_hit",
+                        "acquire.async_pending_skip",
+                    ),
                 )
             if total_pkts or total_nodes or stale_pkts or stale_nodes:
                 # Format 'live / stale' so the ratio of wasted traffic is
@@ -300,18 +533,20 @@ class SHAMapPoolsDisplay(VerticalScroll):
                     f" ({stale_nodes / total_nodes * 100:.0f}% stale)" if total_nodes else ""
                 )
                 table.add_row(
-                    "  peer packets (stale)",
+                    self._marked_name("  peer packets (stale)", "acquire.peer_packets"),
                     f"{_format_count(total_pkts)}",
                     f"{_format_count(stale_pkts)}{stale_pkt_pct}",
                     "",
                     "",
+                    self._delta_str("acquire.peer_packets"),
                 )
                 table.add_row(
-                    "  peer nodes (stale)",
+                    self._marked_name("  peer nodes (stale)", "acquire.peer_nodes"),
                     f"{_format_count(total_nodes)}",
                     f"{_format_count(stale_nodes)}{stale_node_pct}",
                     "",
                     "",
+                    self._delta_str("acquire.peer_nodes"),
                 )
 
         return table
