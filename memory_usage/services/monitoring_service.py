@@ -1104,15 +1104,20 @@ class MonitoringService:
         # Interval for tps: prefer the gap between consecutive ledger close
         # times (authoritative, no websocket jitter). Fall back to wall-clock
         # between snapshots when ledger_close_time isn't available (polling
-        # snapshots, first ledger after a restart, etc).
+        # snapshots, first ledger after a restart, etc). Provenance is
+        # flagged in the log so "+9.0s" from rippled vs "+9.0s" from a
+        # delayed WS delivery are distinguishable at a glance.
         interval_s: Optional[float] = None
+        interval_src = ""  # © = close-time (canonical); ~ = wall-clock fallback
         if ledger_close_time is not None and self._last_ledger_close_time is not None:
             interval_s = float(ledger_close_time - self._last_ledger_close_time)
+            interval_src = "©"
         elif self._last_snapshot_time is not None:
             interval_s = (now - self._last_snapshot_time).total_seconds()
+            interval_src = "~"
 
         if interval_s is not None:
-            since_last_str = f" +{interval_s:.1f}s"
+            since_last_str = f" +{interval_s:.1f}s{interval_src}"
             if transaction_count and interval_s > 0:
                 tps_str = f", {transaction_count / interval_s:.1f} tps"
         self._peak_rss_mb = max(self._peak_rss_mb, rss_mb)
