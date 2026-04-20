@@ -1,9 +1,16 @@
 """
-SHAMap pool / TreeNodeCache lock diagnostics.
+SHAMap internals + inbound-acquire diagnostics.
 
-Renders the ``tagged_pointer_pools`` and ``treenode_cache_locks`` blocks
-emitted by patched rippled builds. Quietly shows 'Waiting for data...'
-on builds that don't emit them — neither key is part of stock rippled.
+Renders the following get_counts blocks emitted by patched rippled builds:
+  - ``tagged_pointer_pools`` — per-slot pool byte totals + aggregate
+  - ``treenode_cache_locks`` — TreeNodeCache lock hold time
+  - ``shamap_sources`` — where SHAMap reads are served from (pack, tree
+    cache, db, filter, wire) + canonical merge stats
+  - ``inbound_acquire`` — generic/consensus/history acquire counters and
+    peer packet volume
+
+All values arrive as u64-encoded strings to avoid float64 precision loss;
+_to_int handles both str and numeric inputs.
 """
 
 from typing import Any, Dict, Optional
@@ -45,7 +52,7 @@ class SHAMapPoolsDisplay(VerticalScroll):
 
     def __init__(self):
         super().__init__()
-        self.border_title = "SHAMap Pools & Locks"
+        self.border_title = "SHAMap Internals"
         self._content = Static("Waiting for data...")
 
     def compose(self) -> ComposeResult:
@@ -61,7 +68,9 @@ class SHAMapPoolsDisplay(VerticalScroll):
 
         pools = counts.get("tagged_pointer_pools")
         locks = counts.get("treenode_cache_locks")
-        if not pools and not locks:
+        sources = counts.get("shamap_sources")
+        acquire = counts.get("inbound_acquire")
+        if not pools and not locks and not sources and not acquire:
             self._content.update(
                 Text(
                     "Not emitted by this rippled build — requires patched get_counts.",
@@ -70,12 +79,14 @@ class SHAMapPoolsDisplay(VerticalScroll):
             )
             return
 
-        self._content.update(self._format(pools, locks))
+        self._content.update(self._format(pools, locks, sources, acquire))
 
     def _format(
         self,
         pools: Optional[Dict[str, Any]],
         locks: Optional[Dict[str, Any]],
+        sources: Optional[Dict[str, Any]],
+        acquire: Optional[Dict[str, Any]],
     ) -> Table:
         # Three columns so bytes and chunks line up across all rows. The
         # aggregate/locks rows leave the third column empty.
@@ -143,5 +154,90 @@ class SHAMapPoolsDisplay(VerticalScroll):
                 "",
             )
             table.add_row("  Mean hold", f"{mean_ns:,} ns", "")
+
+        if sources:
+            if pools or locks:
+                table.add_row("", "", "")
+            tree_hit = _to_int(sources.get("tree_cache_hit"))
+            tree_miss = _to_int(sources.get("tree_cache_miss"))
+            pack_hit = _to_int(sources.get("pack_hit"))
+            db_hit = _to_int(sources.get("db_hit"))
+            db_miss = _to_int(sources.get("db_miss"))
+            filter_hit = _to_int(sources.get("filter_hit"))
+            wire = _to_int(sources.get("wire_node_accepted"))
+            fresh = _to_int(sources.get("canonical_fresh"))
+            dedup = _to_int(sources.get("canonical_dedup"))
+            merge_nodes = _to_int(sources.get("canonical_merge_nodes"))
+            merge_children = _to_int(sources.get("canonical_merge_children"))
+
+            # Tree-cache hit ratio is the single most diagnostic number
+            # in this section — surface it inline instead of making the
+            # user do the math.
+            tree_total = tree_hit + tree_miss
+            tree_pct = f" ({tree_hit / tree_total * 100:.1f}%)" if tree_total else ""
+            db_total = db_hit + db_miss
+            db_pct = f" ({db_hit / db_total * 100:.1f}%)" if db_total else ""
+
+            table.add_row("[bold magenta]SHAMap sources[/bold magenta]", "", "")
+            table.add_row(
+                "  Tree cache hit/miss",
+                f"{_format_count(tree_hit)}/{_format_count(tree_miss)}{tree_pct}",
+                "",
+            )
+            table.add_row(
+                "  DB hit/miss",
+                f"{_format_count(db_hit)}/{_format_count(db_miss)}{db_pct}",
+                "",
+            )
+            table.add_row("  Pack hit", _format_count(pack_hit), "")
+            table.add_row("  Filter hit", _format_count(filter_hit), "")
+            table.add_row("  Wire nodes accepted", _format_count(wire), "")
+            table.add_row(
+                "  Canonical fresh/dedup", f"{_format_count(fresh)}/{_format_count(dedup)}", ""
+            )
+            if merge_nodes or merge_children:
+                table.add_row(
+                    "  Canonical merges (nodes/children)",
+                    f"{_format_count(merge_nodes)}/{_format_count(merge_children)}",
+                    "",
+                )
+
+        if acquire:
+            if pools or locks or sources:
+                table.add_row("", "", "")
+            table.add_row("[bold magenta]Inbound acquire[/bold magenta]", "", "")
+            # The three sub-trees (generic / consensus / history) share a
+            # schema; compact into one row each so the panel stays scannable.
+            for kind in ("generic", "consensus", "history"):
+                sub = acquire.get(kind)
+                if not isinstance(sub, dict):
+                    continue
+                lm_hit = _to_int(sub.get("ledgermaster_hit"))
+                lm_miss = _to_int(sub.get("ledgermaster_miss"))
+                reused = _to_int(sub.get("reused_existing_inbound"))
+                spawned = _to_int(sub.get("spawned_new_inbound"))
+                lm_total = lm_hit + lm_miss
+                lm_pct = f" ({lm_hit / lm_total * 100:.1f}%)" if lm_total else ""
+                table.add_row(
+                    f"  {kind} hit/miss",
+                    f"{_format_count(lm_hit)}/{_format_count(lm_miss)}{lm_pct}",
+                    f"r{_format_count(reused)}/s{_format_count(spawned)}",
+                )
+            async_hit = _to_int(acquire.get("async_ledgermaster_hit"))
+            async_skip = _to_int(acquire.get("async_pending_skip"))
+            peer_pkts = _to_int(acquire.get("peer_packets"))
+            peer_nodes = _to_int(acquire.get("peer_nodes"))
+            if async_hit or async_skip:
+                table.add_row(
+                    "  Async hit/skip",
+                    f"{_format_count(async_hit)}/{_format_count(async_skip)}",
+                    "",
+                )
+            if peer_pkts or peer_nodes:
+                table.add_row(
+                    "  Peer packets/nodes",
+                    f"{_format_count(peer_pkts)}/{_format_count(peer_nodes)}",
+                    "",
+                )
 
         return table
