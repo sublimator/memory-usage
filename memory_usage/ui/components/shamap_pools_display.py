@@ -218,14 +218,21 @@ class SHAMapPoolsDisplay(VerticalScroll):
                     "",
                 )
             # Enrichment counters — first-time transitions where a cached
-            # canonical inner gained an enrichment bit. Shown as
-            # wire+local broken out next to the 'any' total so you can
-            # see which source drove enrichment.
+            # canonical inner gained an enrichment bit. wire and local are
+            # INDEPENDENT counters (a node flagged first by wire then later
+            # by local counts in both), so wire+local is generally >= any.
+            # Split onto two rows with a 'from' subrow to avoid the '+'
+            # looking like a sum.
             if enr_any or enr_wire or enr_local:
                 table.add_row(
-                    "  Enriched (any / wire+local)",
+                    "  Enriched (unique nodes)",
                     _format_count(enr_any),
-                    f"{_format_count(enr_wire)}+{_format_count(enr_local)}",
+                    "",
+                )
+                table.add_row(
+                    "    from wire / local",
+                    f"{_format_count(enr_wire)} / {_format_count(enr_local)}",
+                    "",
                 )
 
         if acquire:
