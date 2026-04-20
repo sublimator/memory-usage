@@ -206,6 +206,9 @@ class SHAMapPoolsDisplay(VerticalScroll):
             if pools or locks or sources:
                 table.add_row("", "", "")
             table.add_row("[bold magenta]Inbound acquire[/bold magenta]", "", "")
+            # Column header so the third column's numbers have context —
+            # without it users reasonably ask "what does r/s mean?".
+            table.add_row("", "hit/miss", "reused/spawned")
             # The three sub-trees (generic / consensus / history) share a
             # schema; compact into one row each so the panel stays scannable.
             for kind in ("generic", "consensus", "history"):
@@ -219,9 +222,9 @@ class SHAMapPoolsDisplay(VerticalScroll):
                 lm_total = lm_hit + lm_miss
                 lm_pct = f" ({lm_hit / lm_total * 100:.1f}%)" if lm_total else ""
                 table.add_row(
-                    f"  {kind} hit/miss",
+                    f"  {kind}",
                     f"{_format_count(lm_hit)}/{_format_count(lm_miss)}{lm_pct}",
-                    f"r{_format_count(reused)}/s{_format_count(spawned)}",
+                    f"{_format_count(reused)}/{_format_count(spawned)}",
                 )
             async_hit = _to_int(acquire.get("async_ledgermaster_hit"))
             async_skip = _to_int(acquire.get("async_pending_skip"))
