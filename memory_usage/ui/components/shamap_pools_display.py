@@ -4,10 +4,12 @@ SHAMap internals + inbound-acquire diagnostics.
 Renders the following get_counts blocks emitted by patched rippled builds:
   - ``tagged_pointer_pools`` — per-slot pool byte totals + aggregate
   - ``treenode_cache_locks`` — TreeNodeCache lock hold time
-  - ``shamap_sources`` — where SHAMap reads are served from (pack, tree
-    cache, db, filter, wire) + canonical merge stats
-  - ``inbound_acquire`` — generic/consensus/history acquire counters and
-    peer packet volume
+  - ``shamap_sources`` — where SHAMap reads are served from (tree cache,
+    pack, db, filter, wire), canonical dedup/merge stats, primed/locally-
+    built tagging, and first-time enrichment transitions (wire+local)
+  - ``inbound_acquire`` — generic/consensus/history acquire counters
+    (hit/miss, reused/spawned, per-kind peer traffic, wire accepted)
+    plus global async + stale counters
 
 All values arrive as u64-encoded strings to avoid float64 precision loss;
 _to_int handles both str and numeric inputs.
@@ -174,6 +176,11 @@ class SHAMapPoolsDisplay(VerticalScroll):
             dedup = _to_int(sources.get("canonical_dedup"))
             merge_nodes = _to_int(sources.get("canonical_merge_nodes"))
             merge_children = _to_int(sources.get("canonical_merge_children"))
+            primed_origin = _to_int(sources.get("primed_origin_tagged"))
+            locally_built = _to_int(sources.get("locally_built_finalized"))
+            enr_any = _to_int(sources.get("enriched_any_flagged"))
+            enr_wire = _to_int(sources.get("enriched_from_wire_flagged"))
+            enr_local = _to_int(sources.get("enriched_from_local_flagged"))
 
             # Tree-cache hit ratio is the single most diagnostic number
             # in this section — surface it inline instead of making the
@@ -197,6 +204,10 @@ class SHAMapPoolsDisplay(VerticalScroll):
             table.add_row("  Pack hit", _format_count(pack_hit), "")
             table.add_row("  Filter hit", _format_count(filter_hit), "")
             table.add_row("  Wire nodes accepted", _format_count(wire), "")
+            if primed_origin:
+                table.add_row("  Primed-origin tagged", _format_count(primed_origin), "")
+            if locally_built:
+                table.add_row("  Locally built finalized", _format_count(locally_built), "")
             table.add_row(
                 "  Canonical fresh/dedup", f"{_format_count(fresh)}/{_format_count(dedup)}", ""
             )
@@ -205,6 +216,16 @@ class SHAMapPoolsDisplay(VerticalScroll):
                     "  Canonical merges (nodes/children)",
                     f"{_format_count(merge_nodes)}/{_format_count(merge_children)}",
                     "",
+                )
+            # Enrichment counters — first-time transitions where a cached
+            # canonical inner gained an enrichment bit. Shown as
+            # wire+local broken out next to the 'any' total so you can
+            # see which source drove enrichment.
+            if enr_any or enr_wire or enr_local:
+                table.add_row(
+                    "  Enriched (any / wire+local)",
+                    _format_count(enr_any),
+                    f"{_format_count(enr_wire)}+{_format_count(enr_local)}",
                 )
 
         if acquire:
