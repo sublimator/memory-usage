@@ -80,18 +80,20 @@ class LedgersInfoDisplay(VerticalScroll):
         root: Dict[str, Any] = nested if isinstance(nested, dict) else info
         self._content.update(self._build_view(root))
 
-    def _build_view(self, ls: Dict[str, Any]) -> Group:
-        return Group(
-            self._gaps_panel(ls),
-            Text(""),
-            self._pointers_panel(ls),
-            Text(""),
-            self._ranges_panel(ls),
-            Text(""),
-            self._inbound_panel(ls),
-            Text(""),
-            self._legend_panel(),
-        )
+    def _build_view(self, ls: Dict[str, Any]) -> Table:
+        # 2-col layout: the tab stretches wide on most terminals and a
+        # single stacked column left half the screen blank. Pair related
+        # panels side-by-side:
+        #   row 1:  Gaps        | Pointers
+        #   row 2:  Ranges      | Inbound / Replay
+        # Root is a Rich Table acting purely as a grid container — no
+        # header, no box, no per-cell padding beyond what Panel draws.
+        grid = Table.grid(expand=True, padding=(0, 1))
+        grid.add_column(ratio=1)
+        grid.add_column(ratio=1)
+        grid.add_row(self._gaps_panel(ls), self._pointers_panel(ls))
+        grid.add_row(self._ranges_panel(ls), self._inbound_panel(ls))
+        return grid
 
     # ------------------------------------------------------------------
     # Sections
@@ -99,38 +101,40 @@ class LedgersInfoDisplay(VerticalScroll):
 
     def _gaps_panel(self, ls: Dict[str, Any]) -> Panel:
         gaps = ls.get("gaps") or {}
-        behind = _g(gaps, "behind_network", default=0)
+        net = ls.get("network") or {}
+        hv_seq = _g(net, "highest_validation_seen", "seq", default=0)
+
+        # "0" is ambiguous in the JSON: it could be a real zero OR a
+        # "not populated" default from the rippled side (the highest-
+        # validated-seen counter isn't wired on older builds). Treat
+        # seq=0 as unknown so behind_network shows '?' instead of a
+        # misleadingly-green 0.
+        hv_known = bool(hv_seq) and int(hv_seq) > 0
+
         publish = _g(gaps, "awaiting_publish", default=0)
         close = _g(gaps, "close_to_validate", default=0)
 
-        diagnosis = self._diagnose(behind, publish, close)
+        if hv_known:
+            behind: Any = _g(gaps, "behind_network", default=0)
+            behind_cell = self._styled_gap(behind)
+            diagnosis = self._diagnose(behind, publish, close)
+        else:
+            behind = None
+            behind_cell = "[dim]?[/dim]"
+            diagnosis = self._diagnose(None, publish, close)
 
         tbl = Table(show_header=False, box=None, expand=True, pad_edge=False)
-        tbl.add_column(style="yellow", no_wrap=True, ratio=2)
+        tbl.add_column(style="yellow", no_wrap=True, ratio=3)
         tbl.add_column(justify="right", no_wrap=True, ratio=1)
         tbl.add_column(style="dim", no_wrap=False, ratio=4)
 
-        tbl.add_row(
-            "behind_network",
-            self._styled_gap(behind),
-            "network.highest_validated − local.validated",
-        )
-        tbl.add_row(
-            "awaiting_publish",
-            self._styled_gap(publish),
-            "local.validated − local.published",
-        )
-        tbl.add_row(
-            "close_to_validate",
-            self._styled_gap(close),
-            "local.closed − local.validated",
-        )
-        tbl.add_row("", "", "")
-        tbl.add_row(
-            "[bold cyan]diagnosis[/bold cyan]",
-            "",
-            f"[bold]{diagnosis}[/bold]",
-        )
+        behind_hint = "validator tip − our validated"
+        if not hv_known:
+            behind_hint += "  [yellow](highest_validated_seen not emitted by this build)[/yellow]"
+        tbl.add_row("behind_network", behind_cell, behind_hint)
+        tbl.add_row("awaiting_publish", self._styled_gap(publish), "validated − published")
+        tbl.add_row("close_to_validate", self._styled_gap(close), "closed − validated")
+        tbl.add_row("[bold cyan]diagnosis[/bold cyan]", "", f"[bold]{diagnosis}[/bold]")
 
         return Panel(tbl, title="[bold]Gaps[/bold]", border_style="magenta")
 
@@ -146,70 +150,53 @@ class LedgersInfoDisplay(VerticalScroll):
         published = loc.get("published") or {}
         building = loc.get("building") or {}
 
+        # 3-col compact table. Tooltip-style inline hint removed from
+        # the row itself (would force the whole panel wider than any
+        # display values warrant); hints live on row 1 in dim italics
+        # above each subsection.
         tbl = Table(
             show_header=True, header_style="bold cyan", box=None, expand=True, pad_edge=False
         )
-        tbl.add_column("Pointer", style="yellow", ratio=2)
-        tbl.add_column("Seq", justify="right", style="green", ratio=1)
-        tbl.add_column("Hash", style="dim", ratio=3)
-        tbl.add_column("Extra", style="dim", ratio=3)
+        tbl.add_column("Pointer", style="yellow", ratio=3)
+        tbl.add_column("Seq", justify="right", style="green", ratio=2)
+        tbl.add_column("Info", style="dim", ratio=3)
 
-        # network.highest_validation_seen
-        tbl.add_row(
-            "network.highest_validation_seen",
-            _fmt_int(hv.get("seq")),
-            _fmt_hash(hv.get("hash")),
+        def _row(name: str, seq: Any, info: str) -> None:
+            tbl.add_row(name, _fmt_int(seq), info)
+
+        _row(
+            "net.highest_seen",
+            hv.get("seq"),
             f"signers {_fmt_int(hv.get('signers_seen'))}/{_fmt_int(hv.get('quorum_needed'))}",
         )
-        # network.preferred
         if pref:
-            tbl.add_row(
-                "network.preferred",
-                _fmt_int(pref.get("seq")),
-                _fmt_hash(pref.get("hash")),
-                "",
-            )
+            _row("net.preferred", pref.get("seq"), _fmt_hash(pref.get("hash")))
 
-        tbl.add_row("", "", "", "")
+        tbl.add_row("", "", "")
 
-        # local.closed
         if closed:
-            tbl.add_row(
+            _row(
                 "local.closed",
-                _fmt_int(closed.get("seq")),
-                _fmt_hash(closed.get("hash")),
+                closed.get("seq"),
                 "validated" if closed.get("validated") else "unvalidated",
             )
-        # local.validated
         if validated:
-            tbl.add_row(
+            _row(
                 "local.validated",
-                _fmt_int(validated.get("seq")),
-                _fmt_hash(validated.get("hash")),
+                validated.get("seq"),
                 f"age {_fmt_int(validated.get('sign_time_age_s'))}s",
             )
-        # local.published
         if published:
-            tbl.add_row(
-                "local.published",
-                _fmt_int(published.get("seq")),
-                "",
-                "",
-            )
-        # local.building (admin-only; may be absent)
+            _row("local.published", published.get("seq"), "")
         if building:
             phase = building.get("phase") or ""
-            tbl.add_row(
-                "local.building",
-                _fmt_int(building.get("parent_seq")),
-                _fmt_hash(building.get("parent_hash")),
-                (
-                    f"phase={phase}  proposers={_fmt_int(building.get('proposer_count'))}  "
-                    f"tx={_fmt_int(building.get('tx_count'))}"
-                    if phase
-                    else ""
-                ),
+            info = (
+                f"{phase} · p={_fmt_int(building.get('proposer_count'))} "
+                f"tx={_fmt_int(building.get('tx_count'))}"
+                if phase
+                else ""
             )
+            _row("local.building", building.get("parent_seq"), info)
 
         return Panel(tbl, title="[bold]Pointers[/bold]", border_style="cyan")
 
@@ -219,25 +206,26 @@ class LedgersInfoDisplay(VerticalScroll):
         complete = loc.get("complete") or {}
         missing = loc.get("missing") or {}
 
-        tbl = Table(show_header=False, box=None, expand=True, pad_edge=False)
-        tbl.add_column(style="yellow", no_wrap=True, ratio=2)
-        tbl.add_column(justify="right", style="green", no_wrap=True, ratio=1)
-        tbl.add_column(style="dim", no_wrap=False, ratio=5)
+        tbl = Table(
+            show_header=True, header_style="bold cyan", box=None, expand=True, pad_edge=False
+        )
+        tbl.add_column("Range", style="yellow", ratio=2)
+        tbl.add_column("N", justify="right", style="green", ratio=1)
+        tbl.add_column("Seqs", style="dim", ratio=5)
 
-        def _range_row(name: str, entry: Dict[str, Any], extra: str = "") -> None:
+        def _row(name: str, entry: Dict[str, Any], suffix: str = "") -> None:
             ranges = entry.get("ranges") or "-"
             count = _fmt_int(entry.get("count"))
-            suffix = f"  {extra}" if extra else ""
-            tbl.add_row(name, count, f"{ranges}{suffix}")
+            tbl.add_row(name, count, f"{ranges}{('  ' + suffix) if suffix else ''}")
 
         target = retained.get("target")
-        _range_row(
+        _row(
             "retained",
             retained,
             f"target={_fmt_int(target)}" if target is not None else "",
         )
-        _range_row("complete", complete)
-        _range_row("missing", missing)
+        _row("complete", complete)
+        _row("missing", missing)
 
         return Panel(tbl, title="[bold]Ranges[/bold]", border_style="green")
 
@@ -341,12 +329,33 @@ class LedgersInfoDisplay(VerticalScroll):
         return f"[bold red]{n:,}[/bold red]"
 
     @staticmethod
-    def _diagnose(behind: int, publish: int, close_v: int) -> str:
-        """Map the 3-tuple to the diagnostic table from the design doc."""
+    def _diagnose(behind: Any, publish: int, close_v: int) -> str:
+        """Map the 3-tuple to the diagnostic table from the design doc.
+
+        ``behind`` may be None to signal 'highest_validated_seen not
+        emitted by this rippled build' — we explicitly distinguish that
+        from an honest zero so the diagnosis doesn't claim 'healthy' on
+        a node we can't actually compare against the network.
+        """
         try:
-            b = int(behind)
             p = int(publish)
             c = int(close_v)
+        except (TypeError, ValueError):
+            return "unknown"
+
+        if behind is None:
+            # Can't assess network lag — focus the diagnosis on publish +
+            # close-to-validate only.
+            if p == 0 and c == 0:
+                return "[yellow]local healthy; network lag unknown[/yellow]"
+            if p > 0 and c == 0:
+                return "[yellow]publish thread backed up[/yellow]"
+            if c > 0:
+                return "[yellow]waiting for validations[/yellow]"
+            return f"[dim]local: publish={p} close={c}; network lag unknown[/dim]"
+
+        try:
+            b = int(behind)
         except (TypeError, ValueError):
             return "unknown"
         if b == 0 and p == 0 and c == 0:
