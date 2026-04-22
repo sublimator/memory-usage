@@ -391,14 +391,27 @@ class LedgersInfoDisplay(VerticalScroll):
         """
         cache_id = id(ls)
         if cache_id != self._raw_cache_id:
+            # Strip local.building before dumping — that subtree alone
+            # is ~80% of the payload (disputes dict keyed by tx hash,
+            # peer_positions dict keyed by validator, acquired array).
+            # The structured Pointers panel already summarises the
+            # useful scalar fields; the raw panel is for eyeballing
+            # everything ELSE, not for scrolling past 300 lines of
+            # consensus internals.
+            pruned: Dict[str, Any] = dict(ls)
+            local = pruned.get("local")
+            if isinstance(local, dict) and "building" in local:
+                pruned_local = dict(local)
+                pruned_local["building"] = "<summarised in Pointers panel>"
+                pruned["local"] = pruned_local
             try:
-                self._raw_cache_text = json.dumps(ls, indent=2, sort_keys=True)
+                self._raw_cache_text = json.dumps(pruned, indent=2, sort_keys=True)
             except (TypeError, ValueError):
-                self._raw_cache_text = repr(ls)
+                self._raw_cache_text = repr(pruned)
             self._raw_cache_id = cache_id
         return Panel(
             Text(self._raw_cache_text, style="dim", no_wrap=True),
-            title="[bold]Raw JSON[/bold]",
+            title="[bold]Raw JSON (local.building omitted)[/bold]",
             border_style="blue",
         )
 
