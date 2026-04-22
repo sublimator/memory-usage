@@ -11,7 +11,8 @@ can still orient themselves.
 Silent/empty on stock rippled where the command isn't registered.
 """
 
-from typing import Any, Dict, Optional
+import json
+from typing import Any, Dict, List, Optional
 
 from rich.console import Group
 from rich.panel import Panel
@@ -59,6 +60,12 @@ class LedgersInfoDisplay(VerticalScroll):
                 style="dim",
             )
         )
+        # Cache the pretty-printed raw JSON string, keyed by the id() of
+        # the last payload object we rendered. The observer fires every
+        # ~2s and the payload dict can be >10KB; re-serialising +
+        # re-rendering each tick was the root of the 'AWFULLY slow' tab.
+        self._raw_cache_id: Optional[int] = None
+        self._raw_cache_text: str = ""
 
     def compose(self) -> ComposeResult:
         yield self._content
@@ -80,20 +87,20 @@ class LedgersInfoDisplay(VerticalScroll):
         root: Dict[str, Any] = nested if isinstance(nested, dict) else info
         self._content.update(self._build_view(root))
 
-    def _build_view(self, ls: Dict[str, Any]) -> Table:
-        # 2-col layout: the tab stretches wide on most terminals and a
-        # single stacked column left half the screen blank. Pair related
-        # panels side-by-side:
-        #   row 1:  Gaps        | Pointers
-        #   row 2:  Ranges      | Inbound / Replay
-        # Root is a Rich Table acting purely as a grid container — no
-        # header, no box, no per-cell padding beyond what Panel draws.
+    def _build_view(self, ls: Dict[str, Any]) -> Group:
+        # Structured summary panels in a 2-col grid, then the raw JSON
+        # payload below in a full-width scrollable panel. Outer widget
+        # is VerticalScroll so the raw panel grows as tall as the
+        # payload needs; user scrolls the widget to reach it.
         grid = Table.grid(expand=True, padding=(0, 1))
         grid.add_column(ratio=1)
         grid.add_column(ratio=1)
-        grid.add_row(self._gaps_panel(ls), self._pointers_panel(ls))
+        # Pointers on the left — they're the primary "what state is
+        # this node in" view. Gaps on the right summarises the delta
+        # against the network.
+        grid.add_row(self._pointers_panel(ls), self._gaps_panel(ls))
         grid.add_row(self._ranges_panel(ls), self._inbound_panel(ls))
-        return grid
+        return Group(grid, Text(""), self._raw_json_panel(ls))
 
     # ------------------------------------------------------------------
     # Sections
@@ -189,14 +196,39 @@ class LedgersInfoDisplay(VerticalScroll):
         if published:
             _row("local.published", published.get("seq"), "")
         if building:
+            # Building row uses rippled's actual field names (not the
+            # design-doc aliases): proposers, converge_percent,
+            # current_ms, len(disputes), len(acquired), and the parent
+            # ledger hash from our_position.previous_ledger. Compact
+            # summary — full detail lives in the raw JSON panel below.
             phase = building.get("phase") or ""
-            info = (
-                f"{phase} · p={_fmt_int(building.get('proposer_count'))} "
-                f"tx={_fmt_int(building.get('tx_count'))}"
-                if phase
-                else ""
+            disputes = building.get("disputes") or {}
+            acquired = building.get("acquired") or []
+            dcount = len(disputes) if isinstance(disputes, (dict, list)) else 0
+            acount = len(acquired) if isinstance(acquired, list) else 0
+            flags = []
+            for f in ("proposing", "validating", "synched", "have_time_consensus"):
+                if building.get(f):
+                    flags.append(f[:4])
+            info_bits: List[str] = []
+            if phase:
+                info_bits.append(phase)
+            info_bits.append(f"p={_fmt_int(building.get('proposers'))}")
+            if "converge_percent" in building:
+                info_bits.append(f"conv={_fmt_int(building.get('converge_percent'))}%")
+            if "current_ms" in building:
+                info_bits.append(f"ms={_fmt_int(building.get('current_ms'))}")
+            if dcount:
+                info_bits.append(f"disp={dcount}")
+            if acount:
+                info_bits.append(f"acq={acount}")
+            if flags:
+                info_bits.append("[" + ",".join(flags) + "]")
+            _row(
+                "local.building",
+                None,
+                " · ".join(info_bits),
             )
-            _row("local.building", building.get("parent_seq"), info)
 
         return Panel(tbl, title="[bold]Pointers[/bold]", border_style="cyan")
 
@@ -247,7 +279,24 @@ class LedgersInfoDisplay(VerticalScroll):
         tbl.add_row("inbound_acquiring", inbound_count, inbound_ranges)
         tbl.add_row("replaying", replay_count, replay_ranges)
 
-        details = inbound.get("details") if isinstance(inbound.get("details"), list) else None
+        # Rippled emits details as a dict keyed by seq-string; the
+        # design doc originally spec'd a list. Accept both so the
+        # handler shape doesn't force us to code against one.
+        raw_details = inbound.get("details")
+        details: Optional[List[Dict[str, Any]]] = None
+        if isinstance(raw_details, list):
+            details = [d for d in raw_details if isinstance(d, dict)]
+        elif isinstance(raw_details, dict):
+            details = []
+            for seq_key, val in raw_details.items():
+                if not isinstance(val, dict):
+                    continue
+                try:
+                    seq = int(seq_key)
+                except (TypeError, ValueError):
+                    seq = val.get("seq") or 0
+                details.append({"seq": seq, **val})
+            details.sort(key=lambda d: int(d.get("seq") or 0))
         if details:
             tbl.add_row("", "", "")
             tbl.add_row(
@@ -259,20 +308,39 @@ class LedgersInfoDisplay(VerticalScroll):
                 show_header=True, header_style="bold cyan", box=None, expand=True, pad_edge=False
             )
             dt.add_column("seq", justify="right", style="yellow")
-            dt.add_column("reason", style="dim")
             dt.add_column("have", style="green")
-            dt.add_column("missing", style="red")
+            dt.add_column("need", style="red")
             dt.add_column("peers", justify="right", style="dim")
             dt.add_column("t/o", justify="right", style="dim")
             for d in details[:20]:
                 if not isinstance(d, dict):
                     continue
+
+                # rippled emits have_{header,state,transactions} as
+                # booleans; condense into a flag string like "HST" with
+                # lowercase for missing. needed_*_hashes are arrays we
+                # show as total-to-fetch counts.
+                def _flag(key: str, letter: str) -> str:
+                    return letter if d.get(key) else letter.lower()
+
+                have_str = (
+                    _flag("have_header", "H")
+                    + _flag("have_state", "S")
+                    + _flag("have_transactions", "T")
+                )
+                need_state = d.get("needed_state_hashes")
+                need_tx = d.get("needed_transaction_hashes")
+                need_state_n = len(need_state) if isinstance(need_state, list) else 0
+                need_tx_n = len(need_tx) if isinstance(need_tx, list) else 0
+                need_str = ""
+                if need_state_n or need_tx_n:
+                    need_str = f"s{need_state_n}/t{need_tx_n}"
+                peers = d.get("peers") if d.get("peers") is not None else d.get("peers_asked")
                 dt.add_row(
                     _fmt_int(d.get("seq")),
-                    str(d.get("reason") or ""),
-                    ",".join(d.get("have") or []) if isinstance(d.get("have"), list) else "",
-                    ",".join(d.get("missing") or []) if isinstance(d.get("missing"), list) else "",
-                    _fmt_int(d.get("peers_asked")),
+                    have_str,
+                    need_str,
+                    _fmt_int(peers),
                     _fmt_int(d.get("timeouts")),
                 )
             return Panel(
@@ -310,6 +378,29 @@ class LedgersInfoDisplay(VerticalScroll):
         for name, desc in lines:
             tbl.add_row(name, desc)
         return Panel(tbl, title="[bold]Legend[/bold]", border_style="blue")
+
+    def _raw_json_panel(self, ls: Dict[str, Any]) -> Panel:
+        """Full pretty-printed JSON of the payload.
+
+        Cached on id(ls) — the monitor typically hands us the same dict
+        object until a new poll replaces it, so most observer ticks hit
+        the cache and we skip re-serialising ~10KB every 2s. Plain Text
+        rendering (not Syntax highlighting) because token-based
+        highlighting on this volume was the main source of the UI
+        stall on this tab.
+        """
+        cache_id = id(ls)
+        if cache_id != self._raw_cache_id:
+            try:
+                self._raw_cache_text = json.dumps(ls, indent=2, sort_keys=True)
+            except (TypeError, ValueError):
+                self._raw_cache_text = repr(ls)
+            self._raw_cache_id = cache_id
+        return Panel(
+            Text(self._raw_cache_text, style="dim", no_wrap=True),
+            title="[bold]Raw JSON[/bold]",
+            border_style="blue",
+        )
 
     # ------------------------------------------------------------------
     # Helpers

@@ -1108,7 +1108,14 @@ class MonitoringService:
             job_types=self.latest_job_types,
             memory_breakdown=breakdown_dict,
             catalogue_status=self.latest_catalogue_status,
-            ledgers_info=self.latest_ledgers_info,
+            # TODO --optional: stashing the full ledgers_info on every
+            # snapshot bloats events.jsonl (~10 KB each, consensus
+            # disputes + peer_positions dominate) and the dashboard
+            # reads the live ApplicationState field instead. Re-enable
+            # if hydration-on-reattach wants the most recent value
+            # without waiting for the first post-attach poll — probably
+            # via a smaller filtered projection (gaps + pointers only).
+            # ledgers_info=self.latest_ledgers_info,
             heap_sample=self.latest_heap_sample,
             sync_start_ledger=s.sync_start_ledger,
             server_state=s.server_state,
