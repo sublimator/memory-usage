@@ -48,6 +48,32 @@ def _fmt_hash(v: Any, head: int = 10, tail: int = 6) -> str:
     return f"{s[:head]}…{s[-tail:]}"
 
 
+def _max_seq_in_ranges(ranges: Any) -> Optional[int]:
+    """Highest seq appearing in a RangeSet string like 'A-B,C-D,E'.
+
+    Used to sanity-check rippled's behind_network when the producer
+    side's math looks suspect. If inbound_acquiring has ledgers up to
+    seq 103,727,569 and rippled claims behind_network = <absurd>, the
+    inbound tip is a reliable lower bound on what the network is at
+    right now.
+    """
+    if not isinstance(ranges, str) or not ranges or ranges == "empty":
+        return None
+    highest: Optional[int] = None
+    for part in ranges.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        hi_str = part.split("-", 1)[1] if "-" in part else part
+        try:
+            hi = int(hi_str)
+        except ValueError:
+            continue
+        if highest is None or hi > highest:
+            highest = hi
+    return highest
+
+
 class LedgersInfoDisplay(VerticalScroll):
     """Ledger state-machine overview."""
 
@@ -109,26 +135,48 @@ class LedgersInfoDisplay(VerticalScroll):
     def _gaps_panel(self, ls: Dict[str, Any]) -> Panel:
         gaps = ls.get("gaps") or {}
         net = ls.get("network") or {}
+        loc = ls.get("local") or {}
         hv_seq = _g(net, "highest_validation_seen", "seq", default=0)
+        val_seq = _g(loc, "validated", "seq", default=0)
+        max_inbound = _max_seq_in_ranges(_g(loc, "inbound_acquiring", "ranges", default=None))
 
-        # "0" is ambiguous in the JSON: it could be a real zero OR a
+        # "0" is ambiguous in the JSON: could be a real zero OR a
         # "not populated" default from the rippled side (the highest-
-        # validated-seen counter isn't wired on older builds). Treat
-        # seq=0 as unknown so behind_network shows '?' instead of a
-        # misleadingly-green 0.
+        # validated-seen counter isn't wired on older builds).
         hv_known = bool(hv_seq) and int(hv_seq) > 0
 
         publish = _g(gaps, "awaiting_publish", default=0)
         close = _g(gaps, "close_to_validate", default=0)
+        raw_behind = _g(gaps, "behind_network", default=0)
 
+        # Sanity-check rippled's behind_network against the inbound-
+        # acquire tip. Rippled has been caught returning nonsense (e.g.
+        # the full ledger seq) when highest_validated_seen is 0 or when
+        # local.validated.seq is miscomputed for the response. If the
+        # inferred-from-inbound value diverges wildly from what rippled
+        # claims, show rippled's as [suspect] and prefer the inferred
+        # value in the diagnosis.
+        inferred_behind: Optional[int] = None
+        if isinstance(val_seq, int) and val_seq > 0 and max_inbound is not None:
+            inferred_behind = max(0, max_inbound - val_seq)
+
+        behind_for_diag: Any = None
+        rippled_suspect = False
         if hv_known:
-            behind: Any = _g(gaps, "behind_network", default=0)
-            behind_cell = self._styled_gap(behind)
-            diagnosis = self._diagnose(behind, publish, close)
+            try:
+                rb = int(raw_behind)
+            except (TypeError, ValueError):
+                rb = 0
+            # Absurd if > 100k — real networks never lag that far during
+            # normal operation; this is the "math on uninitialised state"
+            # signature we've seen.
+            if rb > 100_000 or (inferred_behind is not None and rb > inferred_behind * 5 + 50):
+                rippled_suspect = True
+                behind_for_diag = inferred_behind
+            else:
+                behind_for_diag = rb
         else:
-            behind = None
-            behind_cell = "[dim]?[/dim]"
-            diagnosis = self._diagnose(None, publish, close)
+            behind_for_diag = inferred_behind
 
         tbl = Table(show_header=False, box=None, expand=True, pad_edge=False)
         tbl.add_column(style="yellow", no_wrap=True, ratio=3)
@@ -138,9 +186,29 @@ class LedgersInfoDisplay(VerticalScroll):
         behind_hint = "validator tip − our validated"
         if not hv_known:
             behind_hint += "  [yellow](highest_validated_seen not emitted by this build)[/yellow]"
+        if rippled_suspect:
+            behind_cell = f"[dim strike]{_fmt_int(raw_behind)}[/dim strike]"
+            behind_hint = (
+                "rippled value looks bogus (highest_validated_seen or "
+                "local.validated miscomputed); see inferred_gap below"
+            )
+        elif hv_known and behind_for_diag is not None:
+            behind_cell = self._styled_gap(behind_for_diag)
+        else:
+            behind_cell = "[dim]?[/dim]"
         tbl.add_row("behind_network", behind_cell, behind_hint)
+
         tbl.add_row("awaiting_publish", self._styled_gap(publish), "validated − published")
         tbl.add_row("close_to_validate", self._styled_gap(close), "closed − validated")
+
+        if inferred_behind is not None:
+            tbl.add_row(
+                "inferred_gap",
+                self._styled_gap(inferred_behind),
+                "max(inbound_acquiring) − local.validated",
+            )
+
+        diagnosis = self._diagnose(behind_for_diag, publish, close)
         tbl.add_row("[bold cyan]diagnosis[/bold cyan]", "", f"[bold]{diagnosis}[/bold]")
 
         return Panel(tbl, title="[bold]Gaps[/bold]", border_style="magenta")
