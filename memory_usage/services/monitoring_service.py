@@ -78,6 +78,8 @@ class MonitoringService:
         self.latest_counts: Optional[Dict[str, Any]] = None
         self.latest_job_types: Optional[List[Dict[str, Any]]] = None
         self.latest_catalogue_status: Optional[Dict[str, Any]] = None
+        # Patched-rippled 'ledgers_info' response; None on stock builds.
+        self.latest_ledgers_info: Optional[Dict[str, Any]] = None
         # Memory breakdown (refreshed on its own cadence so the potentially
         # expensive smaps/vmmap parse doesn't block the event loop every
         # ledger close). None until the first refresh task tick completes.
@@ -513,13 +515,18 @@ class MonitoringService:
                 self._finalize_binary_result("crashed", "Process crashed during polling")
                 break
 
-            # Check server info, get counts, and catalogue status in parallel
+            # Check server info, get counts, catalogue status, and ledgers_info in parallel
             server_info_task = self.websocket_manager.get_server_info()
             counts_task = self.websocket_manager.get_counts()
             catalogue_task = self.websocket_manager.get_catalogue_status()
+            ledgers_info_task = self.websocket_manager.get_ledgers_info()
 
-            server_info, counts, catalogue_status = await asyncio.gather(
-                server_info_task, counts_task, catalogue_task, return_exceptions=True
+            server_info, counts, catalogue_status, ledgers_info = await asyncio.gather(
+                server_info_task,
+                counts_task,
+                catalogue_task,
+                ledgers_info_task,
+                return_exceptions=True,
             )
 
             if isinstance(server_info, dict):
@@ -589,6 +596,12 @@ class MonitoringService:
                 self.state_manager.state.counts = counts
                 await self.state_manager._notify_observers()
 
+            # Store ledgers_info if available (patched rippled only)
+            if isinstance(ledgers_info, dict):
+                self.latest_ledgers_info = ledgers_info
+                self.state_manager.state.ledgers_info = ledgers_info
+                await self.state_manager._notify_observers()
+
             # Store catalogue status if available (Xahau-only — absent on upstream rippled)
             if isinstance(catalogue_status, dict):
                 self.latest_catalogue_status = catalogue_status
@@ -649,13 +662,18 @@ class MonitoringService:
 
             # Update complete_ledgers and diagnostics periodically
             if (datetime.now() - last_ledger_update).total_seconds() >= ledger_update_interval:
-                # Call server_info, get_counts, and catalogue_status in parallel
+                # server_info / get_counts / catalogue_status / ledgers_info in parallel
                 server_info_task = self.websocket_manager.get_server_info()
                 counts_task = self.websocket_manager.get_counts()
                 catalogue_task = self.websocket_manager.get_catalogue_status()
+                ledgers_info_task = self.websocket_manager.get_ledgers_info()
 
-                server_info, counts, catalogue_status = await asyncio.gather(
-                    server_info_task, counts_task, catalogue_task, return_exceptions=True
+                server_info, counts, catalogue_status, ledgers_info = await asyncio.gather(
+                    server_info_task,
+                    counts_task,
+                    catalogue_task,
+                    ledgers_info_task,
+                    return_exceptions=True,
                 )
 
                 # Handle server_info
@@ -688,6 +706,12 @@ class MonitoringService:
                 if isinstance(catalogue_status, dict):
                     self.latest_catalogue_status = catalogue_status
                     self.state_manager.state.catalogue_status = catalogue_status
+                    await self.state_manager._notify_observers()
+
+                # Handle ledgers_info (patched-rippled only)
+                if isinstance(ledgers_info, dict):
+                    self.latest_ledgers_info = ledgers_info
+                    self.state_manager.state.ledgers_info = ledgers_info
                     await self.state_manager._notify_observers()
 
                 last_ledger_update = datetime.now()
@@ -1002,6 +1026,7 @@ class MonitoringService:
         self.latest_counts = None
         self.latest_job_types = None
         self.latest_catalogue_status = None
+        self.latest_ledgers_info = None
         self._last_snapshot_rss_mb = None
         self._last_snapshot_anon_mb = None
         self._last_snapshot_time = None
@@ -1083,6 +1108,7 @@ class MonitoringService:
             job_types=self.latest_job_types,
             memory_breakdown=breakdown_dict,
             catalogue_status=self.latest_catalogue_status,
+            ledgers_info=self.latest_ledgers_info,
             heap_sample=self.latest_heap_sample,
             sync_start_ledger=s.sync_start_ledger,
             server_state=s.server_state,

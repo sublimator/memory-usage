@@ -6,6 +6,7 @@ from .catalogue_status_display import CatalogueStatusDisplay
 from .counts_display import CountsDisplay
 from .heap_display import HeapDisplay
 from .jobs_display import JobsDisplay
+from .ledgers_info_display import LedgersInfoDisplay
 from .log_viewer import MonitorLogViewer, ProcessOutputViewer
 from .memory_breakdown_display import MemoryBreakdownDisplay
 from .memory_graph import MemoryGraph
@@ -24,4 +25,5 @@ __all__ = [
     "MemoryBreakdownDisplay",
     "SHAMapPoolsDisplay",
     "HeapDisplay",
+    "LedgersInfoDisplay",
 ]

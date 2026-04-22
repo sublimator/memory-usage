@@ -32,6 +32,9 @@ class MemorySnapshot(BaseModel):
     # Per-VMA RSS breakdown (Linux only; None elsewhere)
     memory_breakdown: Optional[Dict[str, Any]] = None
     catalogue_status: Optional[Dict[str, Any]] = None  # Xahau-only
+    # ledgers_info RPC response — four latest pointers + gaps + ranges.
+    # Patched-rippled only; None on stock builds.
+    ledgers_info: Optional[Dict[str, Any]] = None
 
     # macOS heap(1) sample (class histogram), populated on every N-th ledger
     # when --heap-every-ledger is enabled. Carried in every subsequent

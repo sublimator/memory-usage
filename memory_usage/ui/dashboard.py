@@ -26,6 +26,7 @@ from .components import (
     CountsDisplay,
     HeapDisplay,
     JobsDisplay,
+    LedgersInfoDisplay,
     MemoryBreakdownDisplay,
     MemoryGraph,
     MonitorLogViewer,
@@ -147,6 +148,9 @@ class MemoryMonitorDashboard(App):
     # Heap tab — only populated when --heap-every-ledger is enabled on a
     # macOS host; empty panel with a gentle message otherwise.
     heap_display: HeapDisplay
+    # Ledgers Info tab — patched-rippled 'ledgers_info' RPC. Empty
+    # panel + gentle message on stock rippled.
+    ledgers_info_display: LedgersInfoDisplay
 
     CSS = """
     Screen {
@@ -322,6 +326,15 @@ class MemoryMonitorDashboard(App):
         background: $surface;
     }
 
+    /* Ledgers Info tab — single scroll column with the gaps panel,
+       pointers, ranges, inbound, and legend stacked. */
+    LedgersInfoDisplay {
+        height: 1fr;
+        border: solid $accent;
+        padding: 1;
+        background: $surface;
+    }
+
     /* Fixed 17-row height so it sits at the bottom of the Overview pane
        without docking (which interacted poorly with TabPane). */
     #memory-graph {
@@ -436,6 +449,7 @@ class MemoryMonitorDashboard(App):
         Binding("1", "show_tab('tab-overview')", "Overview", show=False, priority=True),
         Binding("2", "show_tab('tab-stats')", "Stats", show=False, priority=True),
         Binding("3", "show_tab('tab-heap')", "Heap", show=False, priority=True),
+        Binding("4", "show_tab('tab-ledgers')", "Ledgers", show=False, priority=True),
     ]
 
     @inject
@@ -528,6 +542,11 @@ class MemoryMonitorDashboard(App):
                 self.heap_display = HeapDisplay()
                 yield self.heap_display
 
+            # ─── Ledgers Info: patched-rippled ledgers_info RPC ───
+            with TabPane("Ledgers Info", id="tab-ledgers"):
+                self.ledgers_info_display = LedgersInfoDisplay()
+                yield self.ledgers_info_display
+
         yield Footer()
 
     def on_mount(self) -> None:
@@ -593,6 +612,7 @@ class MemoryMonitorDashboard(App):
         for pools in (self.shamap_pools_display, self.shamap_pools_display_stats):
             pools.update_counts(None)
         self.heap_display.update_sample(None)
+        self.ledgers_info_display.update_ledgers_info(None)
         # Reset the shared state last so the status bar observer fires
         # against the empty ApplicationState (blank memory + Total=0 etc).
         await self.state_manager.reset_state()
@@ -681,6 +701,8 @@ class MemoryMonitorDashboard(App):
             state.memory_breakdown = latest["memory_breakdown"]
         if latest.get("catalogue_status"):
             state.catalogue_status = latest["catalogue_status"]
+        if latest.get("ledgers_info"):
+            state.ledgers_info = latest["ledgers_info"]
         if latest.get("complete_ledgers"):
             state.complete_ledgers = latest["complete_ledgers"]
             state.ledger_count = latest.get("ledger_count", 0) or 0
@@ -769,6 +791,8 @@ class MemoryMonitorDashboard(App):
                 self.memory_breakdown_display_stats.update_breakdown(state.memory_breakdown)
             if state.heap_sample:
                 self.heap_display.update_sample(state.heap_sample)
+            if state.ledgers_info:
+                self.ledgers_info_display.update_ledgers_info(state.ledgers_info)
 
             # Detect new process start
             if state.current_pid and state.current_pid != self._last_pid:

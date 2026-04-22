@@ -171,6 +171,32 @@ class WebSocketManager:
             logger.error(f"Error getting counts: {e}")
             return None
 
+    async def get_ledgers_info(self) -> Optional[Dict[str, Any]]:
+        """Get the ledger-state-machine snapshot from the patched rippled.
+
+        Non-standard command — not present on stock rippled. Silently
+        returns None on unknown-method / any error so the polling loop
+        can coexist with unpatched nodes.
+        """
+        client = await self._ensure_connected()
+
+        try:
+            from xrpl.models.requests import GenericRequest
+
+            request = GenericRequest(
+                method="ledgers_info",
+                api_version=self.config.api_version,
+                verbose=True,
+            )
+            response = await client.request(request)
+            if response.is_successful():
+                return response.result
+            logger.debug(f"ledgers_info request failed: {response}")
+            return None
+        except Exception as e:
+            logger.debug(f"Error getting ledgers_info: {e}")
+            return None
+
     async def get_catalogue_status(self) -> Optional[Dict[str, Any]]:
         """Get catalogue loading status"""
         client = await self._ensure_connected()

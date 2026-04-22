@@ -61,6 +61,11 @@ class ApplicationState:
     # Latest macOS heap(1) sample — populated when --heap-every-ledger is
     # enabled, otherwise stays None.
     heap_sample: Optional[Dict[str, Any]] = None
+    # Patched-rippled 'ledgers_info' RPC response. Carries the four
+    # latest-pointers + gaps block, retained/complete/missing ranges,
+    # and (admin-only) building/inbound_acquiring detail. None on stock
+    # rippled where the command isn't registered.
+    ledgers_info: Optional[Dict[str, Any]] = None
     # Server state + ledger age diagnostics, pulled from server_info on each
     # polling/monitoring cycle. Useful before complete_ledgers has any range
     # (early sync / disconnected) to show the user we're at least making
