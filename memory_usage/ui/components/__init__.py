@@ -3,6 +3,7 @@ UI components for the dashboard
 """
 
 from .catalogue_status_display import CatalogueStatusDisplay
+from .config_display import ConfigDisplay
 from .counts_display import CountsDisplay
 from .heap_display import HeapDisplay
 from .jobs_display import JobsDisplay
@@ -26,4 +27,5 @@ __all__ = [
     "SHAMapPoolsDisplay",
     "HeapDisplay",
     "LedgersInfoDisplay",
+    "ConfigDisplay",
 ]

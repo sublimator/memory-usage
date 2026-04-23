@@ -77,6 +77,11 @@ class ApplicationState:
     # Process uptime as reported by server_info.uptime — seconds since rippled
     # started (not since we attached). Useful in attach mode.
     rippled_uptime_s: Optional[int] = None
+    # server_info.state_accounting — per-state dict of
+    # {duration_us: "<int>", transitions: "<int>"}. Reveals reconnect/flap
+    # history (transitions > 1 on connected/disconnected) and where the
+    # node has spent its lifetime.
+    state_accounting: Optional[Dict[str, Any]] = None
 
 
 class StateManager:

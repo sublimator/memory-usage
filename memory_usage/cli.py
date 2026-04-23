@@ -6,6 +6,7 @@ Command-line interface for Xahaud Memory Monitor
 import argparse
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from .config import Config
@@ -187,6 +188,29 @@ def run_heap_trend(args):
     render_heap_trend(rows, meta=meta, top_n=args.top, monotonic_only=args.monotonic)
 
 
+def run_ledgers_info_trace(args):
+    """Stream a jsonpatch diff trace of ledgers_info projections.
+
+    Baseline is printed in full; each subsequent snapshot emits a
+    RFC 6902 patch against the previous projection. Designed for an
+    LLM / human to read linearly and reason about behaviour over time
+    (which IBL stalled, when a policy flipped, how a gap evolved).
+    """
+    from .utils.ledgers_info_trace import render_trace
+
+    dir_path = _resolve_or_exit(args)
+    events_path = dir_path / "events.jsonl"
+    status = render_trace(
+        events_path,
+        seq=args.seq,
+        view=args.view,
+        since=args.since,
+        until=args.until,
+        max_ops=args.max_ops,
+    )
+    sys.exit(status)
+
+
 def run_find(args):
     """Scan consecutive ledger-close pairs for delta predicates."""
     dir_path = _resolve_or_exit(args)
@@ -200,6 +224,46 @@ def run_find(args):
     render_find_results(args.field, args.op, threshold, matches)
 
 
+def _poll_for_processes(interval: float = 1.0):
+    """Wait for a matching rippled/xahaud process to appear.
+
+    Used by --reattach when no process is running at start-up. Spins
+    quietly with a simple dot-progress line so the terminal doesn't
+    stream reams of "No processes found". Ctrl-C aborts cleanly.
+    """
+    print("--reattach: waiting for a xahaud/rippled process to appear…")
+    print("(Ctrl-C to abort)")
+    try:
+        dots = 0
+        while True:
+            procs = find_rippled_processes()
+            if procs:
+                print()
+                return procs
+            dots = (dots + 1) % 4
+            print(f"\r  scanning{'.' * dots:<3}", end="", flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nAborted.")
+        sys.exit(0)
+
+
+def _poll_for_pid(pid: int, interval: float = 1.0):
+    """Wait for a specific PID to exist, for --reattach --pid."""
+    print(f"--reattach: waiting for PID {pid} to appear…")
+    print("(Ctrl-C to abort)")
+    try:
+        while True:
+            proc = get_process_by_pid(pid)
+            if proc:
+                print()
+                return proc
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nAborted.")
+        sys.exit(0)
+
+
 def run_attach_mode(args):
     """Run in attach mode - connect to a running process"""
     if getattr(args, "debug", False):
@@ -209,14 +273,25 @@ def run_attach_mode(args):
     if args.pid:
         # Specific PID provided
         proc = get_process_by_pid(args.pid)
+        if not proc and args.reattach:
+            # --reattach + --pid: wait for the specific PID to come up.
+            # Rare but useful when you're restarting a node and want the
+            # monitor queued up behind it.
+            proc = _poll_for_pid(args.pid)
         if not proc:
             print(f"Error: No process found with PID {args.pid}")
             sys.exit(1)
         print(f"Attaching to PID {proc.pid}: {proc.name}")
     else:
-        # Interactive menu
+        # Interactive menu — unless --reattach asked us to wait for one
+        # to show up. Poll the process list at 1Hz and auto-attach as
+        # soon as exactly one matching process exists (or run the menu
+        # if multiple appear simultaneously). Menu suppression avoids
+        # stdin reads in what's expected to be a long-running watcher.
         processes = find_rippled_processes()
-        proc = display_process_menu(processes)
+        if not processes and args.reattach:
+            processes = _poll_for_processes()
+        proc = display_process_menu(processes) if processes else None
         if not proc:
             sys.exit(0)
 
@@ -279,6 +354,7 @@ def run_attach_mode(args):
         fresh_session=args.fresh,
         heap_every_ledger=args.heap_every_ledger,
         reattach_on_death=args.reattach,
+        initial_tab=getattr(args, "tab", None),
         # Attach mode specific
         attach_mode=True,
         attach_pid=proc.pid,
@@ -504,6 +580,22 @@ def run():
         "every 1s for a new rippled with the same binary_path and attach to "
         "it. Each incarnation gets its own session dir.",
     )
+    attach_parser.add_argument(
+        "--tab",
+        type=int,
+        choices=[1, 2, 3, 4, 5],
+        default=None,
+        metavar="N",
+        help="Open on this tab (1=Overview, 2=Stats, 3=Heap, 4=Ledgers, 5=Config)",
+    )
+    monitor_parser.add_argument(
+        "--tab",
+        type=int,
+        choices=[1, 2, 3, 4, 5],
+        default=None,
+        metavar="N",
+        help="Open on this tab (1=Overview, 2=Stats, 3=Heap, 4=Ledgers, 5=Config)",
+    )
 
     # Diff command — compare two ledger-close snapshots from events.jsonl
     diff_parser = subparsers.add_parser(
@@ -681,6 +773,59 @@ def run():
         help="Root containing session dirs (default: memory_monitor_results)",
     )
 
+    trace_parser = subparsers.add_parser(
+        "ledgers-info",
+        help="Stream a jsonpatch diff trace of ledgers_info snapshots (forensic)",
+        description="Read a session's events.jsonl, extract the ledgers_info "
+        "projection from each snapshot, and emit a RFC 6902 JSON patch "
+        "against the previous projection. Baseline is printed in full.\n\n"
+        "Designed to be piped to an LLM or grepped for specific transitions.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    trace_parser.add_argument(
+        "--dir",
+        type=Path,
+        default=None,
+        help="Session dir (defaults to the currently-running rippled's dir)",
+    )
+    trace_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="memory_monitor_results",
+        help="Root containing session dirs (default: memory_monitor_results)",
+    )
+    trace_parser.add_argument(
+        "--seq",
+        type=int,
+        default=None,
+        help="Restrict ibls section to just this seq (strips peers)",
+    )
+    trace_parser.add_argument(
+        "--view",
+        type=str,
+        choices=["all", "pointers", "ibls", "peers"],
+        default="all",
+        help="Filter which top-level blocks are kept in the projection",
+    )
+    trace_parser.add_argument(
+        "--since",
+        type=str,
+        default=None,
+        help="Only snapshots at/after this ISO timestamp (e.g. 2026-04-23T07:00:00)",
+    )
+    trace_parser.add_argument(
+        "--until",
+        type=str,
+        default=None,
+        help="Only snapshots at/before this ISO timestamp",
+    )
+    trace_parser.add_argument(
+        "--max-ops",
+        type=int,
+        default=None,
+        help="Truncate any single diff beyond this many ops (default: no limit)",
+    )
+
     # Parse args
     args = parser.parse_args()
 
@@ -717,6 +862,10 @@ def run():
 
     if args.command == "heap-trend":
         run_heap_trend(args)
+        return
+
+    if args.command == "ledgers-info":
+        run_ledgers_info_trace(args)
         return
 
     # Handle monitor command
@@ -761,6 +910,7 @@ def run():
         breakdown_interval_seconds=args.breakdown_interval,
         fresh_session=args.fresh,
         heap_every_ledger=args.heap_every_ledger,
+        initial_tab=getattr(args, "tab", None),
     )
 
     # Configure DI container

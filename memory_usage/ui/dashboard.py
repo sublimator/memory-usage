@@ -23,6 +23,7 @@ from ..managers.state_manager import ApplicationState
 from ..services import MonitoringService
 from .components import (
     CatalogueStatusDisplay,
+    ConfigDisplay,
     CountsDisplay,
     HeapDisplay,
     JobsDisplay,
@@ -151,6 +152,8 @@ class MemoryMonitorDashboard(App):
     # Ledgers Info tab — patched-rippled 'ledgers_info' RPC. Empty
     # panel + gentle message on stock rippled.
     ledgers_info_display: LedgersInfoDisplay
+    # Config tab — condensed canonical view of rippled.cfg.
+    config_display: ConfigDisplay
 
     CSS = """
     Screen {
@@ -335,6 +338,15 @@ class MemoryMonitorDashboard(App):
         background: $surface;
     }
 
+    /* Config tab — same shape as Ledgers Info. */
+    ConfigDisplay {
+        height: 1fr;
+        border: solid $accent;
+        padding: 1;
+        background: $surface;
+    }
+
+
     /* Fixed 17-row height so it sits at the bottom of the Overview pane
        without docking (which interacted poorly with TabPane). */
     #memory-graph {
@@ -442,6 +454,7 @@ class MemoryMonitorDashboard(App):
         Binding("space", "pause", "Pause/Resume"),
         Binding("s", "stop_process", "Stop rippled"),
         Binding("g", "toggle_catalogue", "Catalogue"),
+        Binding("x", "copy_screenshot", "Copy screen"),
         # Numeric shortcuts: 1=Overview, 2=Stats, 3=Heap. priority=True so
         # focused children (log viewers, scroll panes) can't swallow them
         # or bounce focus back mid-switch. show=False keeps the footer
@@ -450,6 +463,7 @@ class MemoryMonitorDashboard(App):
         Binding("2", "show_tab('tab-stats')", "Stats", show=False, priority=True),
         Binding("3", "show_tab('tab-heap')", "Heap", show=False, priority=True),
         Binding("4", "show_tab('tab-ledgers')", "Ledgers", show=False, priority=True),
+        Binding("5", "show_tab('tab-config')", "Config", show=False, priority=True),
     ]
 
     @inject
@@ -547,6 +561,11 @@ class MemoryMonitorDashboard(App):
                 self.ledgers_info_display = LedgersInfoDisplay()
                 yield self.ledgers_info_display
 
+            # ─── Config: condensed canonical view of rippled.cfg ───
+            with TabPane("Config", id="tab-config"):
+                self.config_display = ConfigDisplay()
+                yield self.config_display
+
         yield Footer()
 
     def on_mount(self) -> None:
@@ -576,12 +595,29 @@ class MemoryMonitorDashboard(App):
         # new process takes over.
         self.monitoring_service.set_reset_callback(self._reset_ui_for_new_incarnation)
 
+        # Config tab populates once from the path Config was pointed at.
+        self.config_display.update_config(self.config.rippled_config_path)
+
         # Clear focus on mount. No focusable child is a safer initial
         # state than Textual's default "first focusable child" which
         # tended to be a log viewer (now non-focusable anyway, but
         # defensive). App-level priority bindings (1/2/3, q, ctrl+c)
         # route without issue when nothing is focused.
         self.set_focus(None)
+
+        # Honour --tab N if provided (1-indexed, matches the keybinds).
+        initial_tab = getattr(self.config, "initial_tab", None)
+        if initial_tab is not None:
+            tab_ids = {
+                1: "tab-overview",
+                2: "tab-stats",
+                3: "tab-heap",
+                4: "tab-ledgers",
+                5: "tab-config",
+            }
+            tab_id = tab_ids.get(int(initial_tab))
+            if tab_id:
+                self.action_show_tab(tab_id)
 
         # Start the test (save worker so we can cancel it on quit)
         self._monitoring_worker = self.run_worker(self._start_monitoring, exclusive=True)
@@ -613,6 +649,9 @@ class MemoryMonitorDashboard(App):
             pools.update_counts(None)
         self.heap_display.update_sample(None)
         self.ledgers_info_display.update_ledgers_info(None)
+        self.ledgers_info_display.update_state_accounting(None, None)
+        self.ledgers_info_display.reset_state_timeline()
+        self.config_display.update_config(self.config.rippled_config_path)
         # Reset the shared state last so the status bar observer fires
         # against the empty ApplicationState (blank memory + Total=0 etc).
         await self.state_manager.reset_state()
@@ -686,6 +725,21 @@ class MemoryMonitorDashboard(App):
                 last_heap = hs
         if last_heap is not None:
             self.state_manager.state.heap_sample = last_heap
+
+        # State accounting — replay the full history so the transition
+        # timeline on the Ledgers Info tab shows what happened before
+        # reattach. Each update_state_accounting call walks counter
+        # deltas, so feeding them in order rebuilds the same log we'd
+        # have if the dashboard had been running the whole time.
+        self.ledgers_info_display.reset_state_timeline()
+        for s in snapshots:
+            sa = s.get("state_accounting")
+            if isinstance(sa, dict) and sa:
+                self.ledgers_info_display.update_state_accounting(
+                    sa,
+                    s.get("server_state"),
+                    s.get("rippled_uptime_s"),
+                )
 
         # Latest values -> state, then a single notify so other widgets paint
         # once from the tail of the history. Everything the status bar and
@@ -793,6 +847,16 @@ class MemoryMonitorDashboard(App):
                 self.heap_display.update_sample(state.heap_sample)
             if state.ledgers_info:
                 self.ledgers_info_display.update_ledgers_info(state.ledgers_info)
+            # state_accounting ticks every server_info poll — widget
+            # renders a compact row of per-state durations + transition
+            # counts inside the Ledgers Info tab, and reconstructs a
+            # timeline of transitions using server_state + transition-
+            # counter bumps (for sub-poll-interval states we'd miss).
+            self.ledgers_info_display.update_state_accounting(
+                state.state_accounting,
+                state.server_state,
+                state.rippled_uptime_s,
+            )
 
             # Detect new process start
             if state.current_pid and state.current_pid != self._last_pid:
@@ -935,6 +999,92 @@ class MemoryMonitorDashboard(App):
             self.query_one(TabbedContent).active = tab_id
         except Exception:
             pass
+
+    def action_copy_screenshot(self) -> None:
+        """Copy a plain-text render of the current screen to the clipboard.
+
+        Uses Textual's ``export_screenshot`` (official SVG exporter)
+        as the rendering driver because it guarantees a freshly-
+        composited frame — direct calls to ``screen.render_line(y)``
+        from inside a key handler tended to return blank strips
+        because the compositor hadn't repainted yet. We then parse
+        text out of the SVG grouped by Y coordinate.
+        """
+        import re
+        import shutil
+        import subprocess
+        import sys
+        from html import unescape
+
+        try:
+            svg = self.export_screenshot(title=self.title)
+        except Exception as e:
+            self.monitor_log.queue_message(f">>> screenshot render failed: {e}", "bold red")
+            return
+
+        # SVG emits one <text> per styled run with x/y coordinates.
+        # Group by Y (one line) then sort by X (reading order within
+        # the line). The text content is XML-escaped → unescape() it.
+        pat = re.compile(
+            r'<text\b[^>]*?\sx="([\d.]+)"[^>]*?\sy="([\d.]+)"[^>]*?>(.*?)</text>',
+            re.DOTALL,
+        )
+        by_y: Dict[float, List[tuple[float, str]]] = {}
+        for m in pat.finditer(svg):
+            try:
+                x = float(m.group(1))
+                y = float(m.group(2))
+            except ValueError:
+                continue
+            content = unescape(m.group(3))
+            by_y.setdefault(y, []).append((x, content))
+
+        lines: List[str] = []
+        for y in sorted(by_y):
+            row = sorted(by_y[y], key=lambda t: t[0])
+            lines.append("".join(t[1] for t in row).rstrip())
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if not lines:
+            self.monitor_log.queue_message(
+                ">>> screenshot produced no text (SVG extract empty)",
+                "bold red",
+            )
+            return
+        payload = "\n".join(lines) + "\n"
+
+        # Platform-aware clipboard: pbcopy on macOS, wl-copy / xclip on
+        # Linux (first one that exists wins), clip.exe on Windows. Fall
+        # back to dumping to stdout if none available — rare for an
+        # interactive dashboard user, but better than silent failure.
+        commands: List[List[str]]
+        if sys.platform == "darwin":
+            commands = [["pbcopy"]]
+        elif sys.platform == "win32":
+            commands = [["clip"]]
+        else:
+            commands = [["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "-b", "-i"]]
+
+        for cmd in commands:
+            if shutil.which(cmd[0]) is None:
+                continue
+            try:
+                subprocess.run(cmd, input=payload.encode("utf-8"), check=True)
+                self.monitor_log.queue_message(
+                    f">>> screenshot copied to clipboard ({len(lines)} lines)",
+                    "bold cyan",
+                )
+                return
+            except Exception as e:
+                self.monitor_log.queue_message(
+                    f">>> clipboard helper {cmd[0]} failed: {e}", "yellow"
+                )
+                continue
+
+        self.monitor_log.queue_message(
+            ">>> no clipboard helper found (install pbcopy/xclip/wl-copy)",
+            "bold red",
+        )
 
     def action_toggle_catalogue(self) -> None:
         """Show/hide the Xahau catalogue status panel across both tabs.

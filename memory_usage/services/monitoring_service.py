@@ -16,6 +16,7 @@ from ..models.memory_models import BinaryTestResult, MemorySnapshot, SystemInfo,
 from ..utils.formatters import format_duration, format_ledger_ranges
 from ..utils.heap_sampler import is_supported as heap_supported
 from ..utils.heap_sampler import take_heap_sample
+from ..utils.ledgers_info_projection import project_ledgers_info
 from ..utils.memory_breakdown import MemoryBreakdown
 from ..utils.parsers import parse_ledger_ranges
 from ..utils.session_store import SessionStore
@@ -365,6 +366,12 @@ class MonitoringService:
 
         uptime = server_info.get("uptime")
         state.rippled_uptime_s = int(uptime) if isinstance(uptime, (int, float)) else None
+
+        # state_accounting: per-state duration/transitions dict. Useful
+        # for reconnect-flap diagnosis. Passed through untyped — the UI
+        # widget parses the string-integers itself.
+        sa = server_info.get("state_accounting")
+        state.state_accounting = sa if isinstance(sa, dict) else None
 
     async def stop_monitoring(self, wait_for_process: bool = True):
         """Stop monitoring.
@@ -1108,14 +1115,14 @@ class MonitoringService:
             job_types=self.latest_job_types,
             memory_breakdown=breakdown_dict,
             catalogue_status=self.latest_catalogue_status,
-            # TODO --optional: stashing the full ledgers_info on every
-            # snapshot bloats events.jsonl (~10 KB each, consensus
-            # disputes + peer_positions dominate) and the dashboard
-            # reads the live ApplicationState field instead. Re-enable
-            # if hydration-on-reattach wants the most recent value
-            # without waiting for the first post-attach poll — probably
-            # via a smaller filtered projection (gaps + pointers only).
+            # Raw ledgers_info stays OFF on snapshots — ~10 KB per tick,
+            # dominated by consensus-building churn that has no
+            # forensic value off-line. Consumers that need the latest
+            # state read from ApplicationState live.
             # ledgers_info=self.latest_ledgers_info,
+            # The compact projection (~1-2 KB) IS persisted so the
+            # offline `ledgers-info` CLI can diff snapshots.
+            ledgers_info_projection=project_ledgers_info(self.latest_ledgers_info),
             heap_sample=self.latest_heap_sample,
             sync_start_ledger=s.sync_start_ledger,
             server_state=s.server_state,
@@ -1123,6 +1130,7 @@ class MonitoringService:
             closed_ledger_seq=s.closed_ledger_seq,
             closed_ledger_age_s=s.closed_ledger_age_s,
             rippled_uptime_s=s.rippled_uptime_s,
+            state_accounting=s.state_accounting,
         )
 
         # Persist to events.jsonl — crash-resilient source of truth. The

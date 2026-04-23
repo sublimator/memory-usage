@@ -51,6 +51,11 @@ class Config(BaseSettings):
     # lives in sibling dirs, not a single stream.
     reattach_on_death: bool = Field(default=False)
 
+    # Which TabbedContent pane to select on dashboard mount. 1-indexed
+    # to match the numeric keybindings (1=Overview, 2=Stats, 3=Heap,
+    # 4=Ledgers, 5=Config). None keeps the default (Overview).
+    initial_tab: Optional[int] = Field(default=None)
+
     # Binary selection
     specified_binaries: Optional[List[str]] = Field(default=None)
 

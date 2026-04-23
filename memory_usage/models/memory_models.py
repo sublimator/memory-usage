@@ -35,6 +35,13 @@ class MemorySnapshot(BaseModel):
     # ledgers_info RPC response — four latest pointers + gaps + ranges.
     # Patched-rippled only; None on stock builds.
     ledgers_info: Optional[Dict[str, Any]] = None
+    # Compact projection of the above (see utils.ledgers_info_projection).
+    # ~1-2 KB per snapshot, persisted so the offline `ledgers-info` CLI
+    # can diff consecutive snapshots to trace behaviour over time. The
+    # full ledgers_info remains too noisy to diff (consensus disputes
+    # alone change every tick); the projection keeps only the fields a
+    # forensic reader actually wants.
+    ledgers_info_projection: Optional[Dict[str, Any]] = None
 
     # macOS heap(1) sample (class histogram), populated on every N-th ledger
     # when --heap-every-ledger is enabled. Carried in every subsequent
@@ -51,6 +58,10 @@ class MemorySnapshot(BaseModel):
     closed_ledger_seq: Optional[int] = None
     closed_ledger_age_s: Optional[int] = None
     rippled_uptime_s: Optional[int] = None
+    # server_info.state_accounting — per-state duration/transitions dict.
+    # Small (~5 keys) so cheap to carry; hydration uses the full series
+    # to reconstruct the transition timeline across reattach boundaries.
+    state_accounting: Optional[Dict[str, Any]] = None
 
 
 class SystemInfo(BaseModel):

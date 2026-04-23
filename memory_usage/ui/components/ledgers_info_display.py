@@ -12,6 +12,7 @@ Silent/empty on stock rippled where the command isn't registered.
 """
 
 import json
+import time
 from typing import Any, Dict, List, Optional
 
 from rich.console import Group
@@ -92,9 +93,149 @@ class LedgersInfoDisplay(VerticalScroll):
         # re-rendering each tick was the root of the 'AWFULLY slow' tab.
         self._raw_cache_id: Optional[int] = None
         self._raw_cache_text: str = ""
+        # Previous poll's counter snapshot keyed by ledger seq — used to
+        # render Δ columns (this poll − last poll) for each IBL. Seqs
+        # that roll off (ledger finished acquiring, or dashboard was
+        # just attached) show a dim "·" rather than a misleading Δ.
+        self._prev_inbound: Dict[int, Dict[str, int]] = {}
+        # Last rendered Δ strings, keyed by (seq, "state"|"tx"). When a
+        # poll produces no net change for an IBL we re-render the last
+        # meaningful Δ dimmed + prefixed with a ⏸ marker instead of
+        # blanking to a single '·' — avoids the "useful column goes
+        # blank every other tick" blinking on slow/idle acquires.
+        self._last_delta_cell: Dict[tuple[int, str], str] = {}
+        # Peak (max) idle-gap ever observed per (seq, side), in ms.
+        # rippled's event arrays grow across poll but the current
+        # idle value only reflects the instant we observed — a 6s
+        # stall that recovered before the next poll would "flicker
+        # away". Latching the max keeps those spikes visible.
+        self._peak_idle_ms: Dict[tuple[int, str], int] = {}
+        # Last-seen server_info.state_accounting dict — rendered as a
+        # compact inline panel in the Ledgers Info tab. None until the
+        # first server_info poll lands, or if rippled doesn't emit it.
+        self._state_accounting: Optional[Dict[str, Any]] = None
+        # Previous-poll transitions counts per state. Comparing against
+        # the new payload lets us detect transitions we missed at the
+        # poll boundary (e.g. tracking stayed live for 20us — too fast
+        # to catch as current server_state but still bumps the counter).
+        self._prev_transitions: Dict[str, int] = {}
+        # Observed timeline of state changes, appended to as we spot
+        # transitions. Each entry = (monotonic_ts_seconds, state_name,
+        # source) where source ∈ {"observed", "inferred"}. Capped at
+        # _STATE_LOG_MAX so long-lived dashboards don't grow unbounded.
+        self._state_log: List[tuple[float, str, str]] = []
+        self._STATE_LOG_MAX = 12
+        # Last-observed current server_state — the dashboard needs this
+        # so "state changed" detection isn't fooled by a poll arriving
+        # mid-transition.
+        self._last_server_state: Optional[str] = None
+        # Monotonic wall origin (time.monotonic() at widget creation).
+        # Timeline entries render as offsets from this so the first
+        # logged transition is "0.0s" and later ones read as cumulative
+        # dashboard uptime.
+        self._clock_origin: float = time.monotonic()
+        # Number of most-recent policy-history entries to chain in the
+        # compact `policy` cell. Producer hands us the full transition
+        # log per IBL (in `policy_history`), so we just read + trim.
+        self._POLICY_HISTORY_MAX = 6
 
     def compose(self) -> ComposeResult:
         yield self._content
+
+    def reset_state_timeline(self) -> None:
+        """Clear the reconstructed transition log.
+
+        Called from the dashboard on --reattach so the new incarnation
+        starts with a blank timeline, and the clock origin rebases to
+        "now" so displayed offsets are relative to this run rather than
+        absolute-since-widget-creation.
+        """
+        self._state_log.clear()
+        self._prev_transitions.clear()
+        self._last_server_state = None
+        self._clock_origin = time.monotonic()
+
+    def update_state_accounting(
+        self,
+        sa: Optional[Dict[str, Any]],
+        server_state: Optional[str] = None,
+        rippled_uptime_s: Optional[int] = None,
+    ) -> None:
+        """Server_info.state_accounting → cached + timeline extended.
+
+        Server-side `transitions` counts only report totals; they don't
+        tell us WHEN each transition happened. We reconstruct ordering
+        client-side: each poll compares transitions counts against the
+        prior snapshot and watches for ``server_state`` changes.
+
+        ``rippled_uptime_s`` is preferred as the timeline clock — it's
+        server-side and therefore stable across reattaches (so hydrated
+        replay and live polls land on a single coherent axis). If
+        rippled_uptime_s is None we fall back to our own monotonic
+        offset (widget-creation origin), which is fine for the
+        cold-start case.
+        """
+        self._state_accounting = sa if isinstance(sa, dict) else None
+        if self._state_accounting is None:
+            return
+
+        if rippled_uptime_s is not None:
+            now = float(rippled_uptime_s)
+        else:
+            now = time.monotonic() - self._clock_origin
+
+        if not self._state_log and server_state:
+            self._state_log.append((now, server_state, "observed"))
+            self._last_server_state = server_state
+            for name, entry in self._state_accounting.items():
+                if isinstance(entry, dict):
+                    try:
+                        self._prev_transitions[name] = int(entry.get("transitions") or 0)
+                    except (TypeError, ValueError):
+                        pass
+            return
+
+        # Collect all entries that fire this poll (inferred counter
+        # bumps + any observed state change), then sort them by the
+        # inherent state-ladder order before appending. This resolves
+        # same-timestamp ties with the natural causal order a node
+        # climbs: disconnected → connected → syncing → tracking → full.
+        pending: List[tuple[str, str]] = []
+        for name, entry in self._state_accounting.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                tr = int(entry.get("transitions") or 0)
+            except (TypeError, ValueError):
+                continue
+            prev = self._prev_transitions.get(name, tr)
+            bump = tr - prev
+            if bump > 0 and name != server_state:
+                for _ in range(bump):
+                    pending.append((name, "inferred"))
+            self._prev_transitions[name] = tr
+
+        if server_state and server_state != self._last_server_state:
+            pending.append((server_state, "observed"))
+            self._last_server_state = server_state
+
+        if pending:
+            ladder = {
+                "disconnected": 0,
+                "connected": 1,
+                "syncing": 2,
+                "tracking": 3,
+                "full": 4,
+            }
+            # Stable sort — within a ladder tie, the original relative
+            # insertion order is preserved, which keeps the observed
+            # entry at the end of its tie group (it was appended last).
+            pending.sort(key=lambda p: ladder.get(p[0], 99))
+            for name, source in pending:
+                self._state_log.append((now, name, source))
+
+        if len(self._state_log) > self._STATE_LOG_MAX:
+            del self._state_log[: len(self._state_log) - self._STATE_LOG_MAX]
 
     def update_ledgers_info(self, info: Optional[Dict[str, Any]]) -> None:
         if not isinstance(info, dict) or not info:
@@ -114,19 +255,39 @@ class LedgersInfoDisplay(VerticalScroll):
         self._content.update(self._build_view(root))
 
     def _build_view(self, ls: Dict[str, Any]) -> Group:
-        # Structured summary panels in a 2-col grid, then the raw JSON
-        # payload below in a full-width scrollable panel. Outer widget
-        # is VerticalScroll so the raw panel grows as tall as the
-        # payload needs; user scrolls the widget to reach it.
-        grid = Table.grid(expand=True, padding=(0, 1))
-        grid.add_column(ratio=1)
-        grid.add_column(ratio=1)
-        # Pointers on the left — they're the primary "what state is
-        # this node in" view. Gaps on the right summarises the delta
-        # against the network.
-        grid.add_row(self._pointers_panel(ls), self._gaps_panel(ls))
-        grid.add_row(self._ranges_panel(ls), self._inbound_panel(ls))
-        return Group(grid, Text(""), self._raw_json_panel(ls))
+        # Layout: everything interesting stacks in the LEFT column —
+        # pointers + gaps side-by-side at the top, then ranges,
+        # inbound, and the legend below. The raw JSON parks in the
+        # RIGHT column as a reference that never steals width from
+        # the inbound-detail table (which has many cryptic cols and
+        # gets unreadable at ~50% of terminal width).
+        inner = Table.grid(expand=True, padding=(0, 1))
+        inner.add_column(ratio=1)
+        inner.add_column(ratio=1)
+        inner.add_row(self._pointers_panel(ls), self._gaps_panel(ls))
+
+        left_stack_items: List[Any] = [inner, Text("")]
+        sa_panel = self._state_accounting_panel()
+        if sa_panel is not None:
+            left_stack_items += [sa_panel, Text("")]
+        left_stack_items += [
+            self._ranges_panel(ls),
+            Text(""),
+            self._inbound_panel(ls),
+        ]
+        peers_panel = self._peers_panel(ls)
+        if peers_panel is not None:
+            left_stack_items += [Text(""), peers_panel]
+        left_stack_items += [Text(""), self._legend_panel()]
+        left_stack = Group(*left_stack_items)
+
+        outer = Table.grid(expand=True, padding=(0, 1))
+        # Left gets the majority — inbound detail has ~11 columns that
+        # need room. Right holds raw JSON purely for reference.
+        outer.add_column(ratio=3)
+        outer.add_column(ratio=1)
+        outer.add_row(left_stack, self._raw_json_panel(ls))
+        return Group(outer)
 
     # ------------------------------------------------------------------
     # Sections
@@ -347,6 +508,18 @@ class LedgersInfoDisplay(VerticalScroll):
         tbl.add_row("inbound_acquiring", inbound_count, inbound_ranges)
         tbl.add_row("replaying", replay_count, replay_ranges)
 
+        # RIPPLED_PRIORITY_QUORUM_IBL experiment exposes which single
+        # IBL is currently holding priority — trigger() is suppressed
+        # on all others while that one completes. Only present when
+        # the experiment flag is on and a priority IBL exists.
+        prio_hash = inbound.get("priority_quorum_hash")
+        if prio_hash:
+            tbl.add_row(
+                "priority_quorum",
+                "",
+                f"[bold yellow]★[/bold yellow] [dim]{_fmt_hash(prio_hash)}[/dim]",
+            )
+
         # Rippled emits details as a dict keyed by seq-string; the
         # design doc originally spec'd a list. Accept both so the
         # handler shape doesn't force us to code against one.
@@ -376,18 +549,72 @@ class LedgersInfoDisplay(VerticalScroll):
                 show_header=True, header_style="bold cyan", box=None, expand=True, pad_edge=False
             )
             dt.add_column("seq", justify="right", style="yellow")
+            # Reason compact letter (C=consensus, H=history, G=generic,
+            # S=shard). Dim "?" if the wire payload didn't include it.
+            dt.add_column("r", style="bold magenta")
+            # Age of the IBL from rippled's `age_ms` (ms since IBL
+            # construction). Pairs with *_rounds to eyeball rate; a
+            # 40s IBL with R3 state is basically idle.
+            dt.add_column("age", justify="right", style="blue")
+            # held = age_ms − last_admit_ms. Time since the admission
+            # policy last let this IBL run trigger(). 0 = ran just now;
+            # climbing = policy is suppressing it; ∅ = never admitted.
+            dt.add_column("held", justify="right", style="magenta")
+            # Short-code for the most recent admission-policy decision:
+            # admitted / publish-blocker / frontier / held /
+            # held-bootstrap / force-sweep / default. Explains *why* the
+            # held value is what it is.
+            dt.add_column("policy", style="white")
             dt.add_column("have", style="green")
-            dt.add_column("need", style="red")
+            # Skip-list probe lifecycle: P=probe_sent / K=have_skip /
+            # H=skip_harvested. Lowercase = false for that flag. When
+            # all three are off the whole cell dims so only IBLs with
+            # skip-list activity catch the eye.
+            dt.add_column("skip", style="cyan")
+            # state: inserted / requested / unique-first-claim / rounds,
+            # followed by a per-poll Δ column for the same tuple.
+            dt.add_column("state i/r/u/R", justify="right", style="cyan")
+            dt.add_column("Δ state", justify="right", style="magenta")
+            dt.add_column("tx i/r/u/R", justify="right", style="cyan")
+            dt.add_column("Δ tx", justify="right", style="magenta")
+            # stall S/T: current idle gap + peak ever observed, per side.
+            # Current = last_request.t − last_response.t (positive iff
+            # we've asked after our last reply, i.e. request outstanding).
+            # Peak is latched in the widget across polls so transient
+            # spikes don't flicker away. 0.1s precision.
+            dt.add_column("stall S/T (cur↑peak)", justify="right", style="yellow")
+            # resp-gap S/T: min..max inter-response gap in the event
+            # array for this IBL, per side. Shows fastest/slowest reply
+            # cadence at a glance. Computed fresh each poll from the
+            # full event vector — no latching needed.
+            dt.add_column("resp gap S/T (min/avg/max)", justify="right", style="green")
             dt.add_column("peers", justify="right", style="dim")
             dt.add_column("t/o", justify="right", style="dim")
+            # Build the snapshot we'll stash for next poll's deltas.
+            # Keyed by seq, same field names as the wire payload so the
+            # delta helper can read both prev + this with identical keys.
+            next_snapshot: Dict[int, Dict[str, int]] = {}
+
             for d in details[:20]:
                 if not isinstance(d, dict):
                     continue
 
                 # rippled emits have_{header,state,transactions} as
                 # booleans; condense into a flag string like "HST" with
-                # lowercase for missing. needed_*_hashes are arrays we
-                # show as total-to-fetch counts.
+                # lowercase for missing.
+                #
+                # Progress numbers come from patched rippled's per-IBL
+                # atomic counters (see InboundLedger.h):
+                #   *_nodes_inserted   — node additions that returned isGood
+                #   *_requests_sent    — hashes asked of peers (pre-fanout)
+                #   *_unique_hashes    — first-claim winners against the
+                #                        InboundLedgers hash registry; the
+                #                        delta from requests_sent is the
+                #                        cross-IBL duplication this IBL
+                #                        would have avoided had it
+                #                        consulted a shared claim table
+                #   *_rounds           — getMissingNodes descent cycles
+                #                        (batches emitted, NOT peer fans)
                 def _flag(key: str, letter: str) -> str:
                     return letter if d.get(key) else letter.lower()
 
@@ -396,21 +623,428 @@ class LedgersInfoDisplay(VerticalScroll):
                     + _flag("have_state", "S")
                     + _flag("have_transactions", "T")
                 )
-                need_state = d.get("needed_state_hashes")
-                need_tx = d.get("needed_transaction_hashes")
-                need_state_n = len(need_state) if isinstance(need_state, list) else 0
-                need_tx_n = len(need_tx) if isinstance(need_tx, list) else 0
-                need_str = ""
-                if need_state_n or need_tx_n:
-                    need_str = f"s{need_state_n}/t{need_tx_n}"
+
+                # Skip-list probe lifecycle flags. P=probe_sent,
+                # K=have_skip, H=skip_harvested. Whole cell dims when
+                # no skip-list activity has fired — the producer omits
+                # these keys entirely on old builds, which naturally
+                # renders as "pkh" dim.
+                sp = bool(d.get("skip_probe_sent"))
+                sk = bool(d.get("have_skip"))
+                sh = bool(d.get("skip_harvested"))
+                skip_letters = ("P" if sp else "p") + ("K" if sk else "k") + ("H" if sh else "h")
+                if not (sp or sk or sh):
+                    skip_cell = f"[dim]{skip_letters}[/dim]"
+                else:
+                    # Colour each letter independently so the trail of
+                    # progress is readable: grey = off, cyan = probe,
+                    # green = landed+harvested.
+                    parts: List[str] = []
+                    parts.append("[cyan]P[/cyan]" if sp else "[dim]p[/dim]")
+                    parts.append("[green]K[/green]" if sk else "[dim]k[/dim]")
+                    parts.append("[green]H[/green]" if sh else "[dim]h[/dim]")
+                    skip_cell = "".join(parts)
+
+                seq_val = d.get("seq")
+                try:
+                    seq_int = int(seq_val) if seq_val is not None else None
+                except (TypeError, ValueError):
+                    seq_int = None
+                prev = self._prev_inbound.get(seq_int) if seq_int is not None else None
+
+                # Count "burrow" rounds from the state_responses array —
+                # rounds that made no useful SLE progress. A round
+                # qualifies when *either* of these holds (OR, not
+                # exclusive — a single round can satisfy both):
+                #   - bc1_inners > 0: the reply added branch-count-1
+                #     inner nodes (single-child pass-throughs, a.k.a.
+                #     pure single-path skeleton walking down a deep
+                #     subtree). Sharper signal than "n == inners"
+                #     because it excludes genuine multi-branch inners,
+                #     which represent real discovery.
+                #   - leaves exist and every non-zero type in the
+                #     histogram is DirectoryNode: the book-base
+                #     burrowing tail (offer-book directory pages).
+                state_burrow: Optional[int] = None
+                resp_arr = d.get("state_responses")
+                if isinstance(resp_arr, list):
+                    burrow = 0
+                    for ev in resp_arr:
+                        if not isinstance(ev, dict):
+                            continue
+                        try:
+                            n = int(ev.get("n") or 0)
+                            inners = int(ev.get("inners") or 0)
+                            bc1_inners = int(ev.get("bc1_inners") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        leaves = max(0, n - inners)
+                        types_raw = ev.get("types")
+                        ev_types: Dict[Any, Any] = types_raw if isinstance(types_raw, dict) else {}
+                        only_dir_leaves = (
+                            leaves > 0
+                            and len(ev_types) > 0
+                            and all((v == 0 or k == "DirectoryNode") for k, v in ev_types.items())
+                        )
+                        if bc1_inners > 0 or only_dir_leaves:
+                            burrow += 1
+                    state_burrow = burrow
+
+                def _quad(
+                    ins_k: str,
+                    req_k: str,
+                    uniq_k: str,
+                    rounds_k: str,
+                    burrow: Optional[int] = None,
+                ) -> str:
+                    ins = int(d.get(ins_k) or 0)
+                    req = int(d.get(req_k) or 0)
+                    uniq = d.get(uniq_k)
+                    rounds = d.get(rounds_k)
+                    if not (ins or req or uniq or rounds):
+                        return "-"
+                    parts = [f"{_fmt_int(ins)}/{_fmt_int(req)}"]
+                    parts.append(_fmt_int(uniq) if uniq is not None else "-")
+                    if rounds is not None:
+                        rounds_str = f"R{_fmt_int(rounds)}"
+                        # Append "(N)" burrow-count when present and
+                        # non-zero — noisy to print (0) for the healthy
+                        # common case, so keep it off when zero.
+                        if burrow is not None and burrow > 0:
+                            rounds_str += f"[yellow]({burrow})[/yellow]"
+                        parts.append(rounds_str)
+                    else:
+                        parts.append("-")
+                    return "/".join(parts)
+
+                def _quad_delta(
+                    side: str, ins_k: str, req_k: str, uniq_k: str, rounds_k: str
+                ) -> str:
+                    # No prior reading for this seq — nothing to diff.
+                    # Render a dim "·" so the column shape stays intact.
+                    if prev is None or seq_int is None:
+                        return "[dim]·[/dim]"
+
+                    def _d(k: str) -> Optional[int]:
+                        cur = d.get(k)
+                        old = prev.get(k) if prev else None
+                        if cur is None and old is None:
+                            return None
+                        try:
+                            return int(cur or 0) - int(old or 0)
+                        except (TypeError, ValueError):
+                            return None
+
+                    di = _d(ins_k)
+                    dr = _d(req_k)
+                    du = _d(uniq_k)
+                    drs = _d(rounds_k)
+                    key = (seq_int, side)
+                    if di is None and dr is None and du is None and drs is None:
+                        return "-"
+                    if not any((di, dr, du, drs)):
+                        # Quiet poll — nothing moved for this IBL. Reuse
+                        # the last non-zero Δ string so the column
+                        # doesn't blink to blank; dim it + prefix ⏸ to
+                        # signal 'stale, unchanged since last poll'.
+                        prior = self._last_delta_cell.get(key)
+                        if prior:
+                            return f"[dim]⏸ {prior}[/dim]"
+                        return "[dim]·[/dim]"
+
+                    def _s(v: Optional[int]) -> str:
+                        if v is None:
+                            return "-"
+                        if v > 0:
+                            return f"[green]+{v:,}[/green]"
+                        if v < 0:
+                            return f"[red]{v:,}[/red]"
+                        return "[dim]0[/dim]"
+
+                    parts = [_s(di), _s(dr), _s(du)]
+                    parts.append("[dim]·[/dim]" if drs in (None, 0) else _s(drs))
+                    rendered = "/".join(parts)
+                    self._last_delta_cell[key] = rendered
+                    return rendered
+
+                state_cell = _quad(
+                    "state_nodes_inserted",
+                    "state_requests_sent",
+                    "state_unique_hashes",
+                    "state_rounds",
+                    burrow=state_burrow,
+                )
+                dstate_cell = _quad_delta(
+                    "state",
+                    "state_nodes_inserted",
+                    "state_requests_sent",
+                    "state_unique_hashes",
+                    "state_rounds",
+                )
+                tx_cell = _quad(
+                    "tx_nodes_inserted",
+                    "tx_requests_sent",
+                    "tx_unique_hashes",
+                    "tx_rounds",
+                )
+                dtx_cell = _quad_delta(
+                    "tx",
+                    "tx_nodes_inserted",
+                    "tx_requests_sent",
+                    "tx_unique_hashes",
+                    "tx_rounds",
+                )
+
+                # Helpers for event-array driven metrics. Arrays are
+                # `[{"t": <ms-since-IBL-start>, "n": <count>}, ...]`.
+                def _sorted_ts(key: str) -> List[int]:
+                    evs = d.get(key)
+                    if not isinstance(evs, list):
+                        return []
+                    out: List[int] = []
+                    for ev in evs:
+                        if not isinstance(ev, dict):
+                            continue
+                        t_val = ev.get("t")
+                        if t_val is None:
+                            continue
+                        try:
+                            out.append(int(t_val))
+                        except (TypeError, ValueError):
+                            continue
+                    out.sort()
+                    return out
+
+                def _max_t(key: str) -> Optional[int]:
+                    ts = _sorted_ts(key)
+                    return ts[-1] if ts else None
+
+                def _fmt_s(ms: int) -> str:
+                    # 0.1s precision — user asked for finer resolution
+                    # than whole seconds so sub-second flickers show up.
+                    secs = ms / 1000.0
+                    return f"{secs:.1f}s"
+
+                def _stall(side: str, req_key: str, resp_key: str) -> str:
+                    last_req = _max_t(req_key)
+                    last_resp = _max_t(resp_key)
+                    key = (seq_int, side) if seq_int is not None else None
+                    if last_req is None and last_resp is None:
+                        return "[dim]·[/dim]"
+                    if last_req is None:
+                        return "[dim]0.0s[/dim]"
+                    if last_resp is None:
+                        # Asked, no reply ever — pure stall. Latch the
+                        # magnitude as the peak so you can see it grew.
+                        gap_ms = last_req
+                        if key is not None:
+                            self._peak_idle_ms[key] = max(self._peak_idle_ms.get(key, 0), gap_ms)
+                        peak = self._peak_idle_ms.get(key, gap_ms) if key else gap_ms
+                        return f"[red]∅↑{_fmt_s(peak)}[/red]" if peak >= 2000 else "[red]∅[/red]"
+                    cur_ms = max(0, last_req - last_resp)
+                    if key is not None:
+                        self._peak_idle_ms[key] = max(self._peak_idle_ms.get(key, 0), cur_ms)
+                    peak_ms = self._peak_idle_ms.get(key, cur_ms) if key else cur_ms
+
+                    def _col(ms: int) -> str:
+                        s = _fmt_s(ms)
+                        if ms < 2000:
+                            return f"[dim]{s}[/dim]"
+                        if ms < 10_000:
+                            return s
+                        return f"[red]{s}[/red]"
+
+                    return f"{_col(cur_ms)}↑{_col(peak_ms)}"
+
+                stall_cell = (
+                    f"{_stall('state', 'state_requests', 'state_responses')}"
+                    f"/{_stall('tx', 'tx_requests', 'tx_responses')}"
+                )
+
+                def _resp_gap(resp_key: str) -> str:
+                    """min/avg/max ms between consecutive responses."""
+                    ts = _sorted_ts(resp_key)
+                    if len(ts) < 2:
+                        return "[dim]·[/dim]"
+                    gaps = [b - a for a, b in zip(ts, ts[1:]) if b > a]
+                    if not gaps:
+                        return "[dim]·[/dim]"
+                    lo = min(gaps)
+                    hi = max(gaps)
+                    avg = sum(gaps) // len(gaps)
+                    return f"{_fmt_s(lo)}/{_fmt_s(avg)}/{_fmt_s(hi)}"
+
+                respgap_cell = f"{_resp_gap('state_responses')}/{_resp_gap('tx_responses')}"
+
+                # Reason lookup. Rippled-side Reason enum collapsed to a
+                # single-letter tag. Accept either the raw enum name or
+                # a pre-normalised short form, whichever the RPC emits.
+                reason_raw = str(d.get("reason") or "").upper()
+                reason_cell = {
+                    "CONSENSUS": "C",
+                    "HISTORY": "H",
+                    "GENERIC": "G",
+                    "SHARD": "S",
+                    "C": "C",
+                    "H": "H",
+                    "G": "G",
+                    "S": "S",
+                }.get(reason_raw, "[dim]?[/dim]")
+
+                # Age formatting: seconds with 1dp under a minute,
+                # `MmSs` above — 1m23s reads faster than 83.4s when
+                # scanning a column of mixed magnitudes.
+                age_ms_val = d.get("age_ms")
+                try:
+                    age_ms = int(age_ms_val) if age_ms_val is not None else None
+                except (TypeError, ValueError):
+                    age_ms = None
+
+                def _fmt_age(ms: Optional[int], red_from_ms: int = 120_000) -> str:
+                    if ms is None:
+                        return "[dim]·[/dim]"
+                    if ms < 60_000:
+                        return f"{ms / 1000:.1f}s"
+                    total = ms // 1000
+                    mins, secs = divmod(total, 60)
+                    s = f"{mins}m{secs:02d}s"
+                    return f"[red]{s}[/red]" if ms >= red_from_ms else s
+
+                age_cell = _fmt_age(age_ms)
+
+                # Held = time since last admit. last_admit_ms == 0 means
+                # never admitted (or freshly created — we can't tell on
+                # an IBL with age ~0 either, so we only flag ∅ once the
+                # IBL has been around long enough for the distinction to
+                # matter — say >1s of age with no admit).
+                last_admit_raw = d.get("last_admit_ms")
+                try:
+                    last_admit_ms = int(last_admit_raw) if last_admit_raw is not None else None
+                except (TypeError, ValueError):
+                    last_admit_ms = None
+                if age_ms is None or last_admit_ms is None:
+                    held_cell = "[dim]·[/dim]"
+                elif last_admit_ms == 0:
+                    held_cell = "[dim]∅[/dim]" if age_ms < 1_000 else "[red]∅[/red]"
+                else:
+                    held_cell = _fmt_age(max(0, age_ms - last_admit_ms), red_from_ms=10_000)
+
+                # Admission-policy trail from the producer's
+                # policy_history array: [{t, reason}, ...] with one
+                # entry per transition (producer appends only on
+                # reason-change). Show the last N as a compact chain of
+                # coloured letters; the current state (rightmost) is
+                # bold. Fall back to the single policy_reason field on
+                # builds without the full history.
+                # Letter scheme is unambiguous under the renamed codes
+                # (held-bootstrap → bootstrap, force-sweep → evict),
+                # and we keep the old names mapped to the same glyphs
+                # so this dashboard works against older rippled builds
+                # too.
+                pol_letter_map = {
+                    "admitted": ("A", "green"),
+                    "publish-blocker": ("P", "yellow"),
+                    "publish-window": ("W", "yellow"),
+                    "frontier": ("F", "cyan"),
+                    "frontier-no-tx": ("N", "cyan"),
+                    "held": ("H", "magenta"),
+                    "bootstrap": ("B", "magenta"),
+                    "held-bootstrap": ("B", "magenta"),
+                    "evict": ("E", "red"),
+                    "force-sweep": ("E", "red"),
+                    # Cold-catch-up admissions for historical backfill
+                    # work: completer finishes the last N retention
+                    # entries, support keeps the fetch-pack pump primed.
+                    "cold-completer": ("C", "green"),
+                    "cold-support": ("S", "green"),
+                    # Tip IBL sub-states in CATCHUP: tip-header-only is
+                    # pre-state-probe ("we just want the header"),
+                    # tip-skip-probe is the active skip-list probe phase.
+                    "tip-header-only": ("O", "cyan"),
+                    "tip-skip-probe": ("Q", "cyan"),
+                    # Pre-header IBL (mySeq == 0). Admitted unconditionally
+                    # until the header arrives and seq is known.
+                    "pending-seq": ("?", "blue"),
+                    "default": ("·", "dim"),
+                }
+                raw_hist = d.get("policy_history")
+                trail_codes: List[str] = []
+                if isinstance(raw_hist, list):
+                    for ev in raw_hist:
+                        if isinstance(ev, dict):
+                            r = ev.get("reason")
+                            if r is not None:
+                                trail_codes.append(str(r))
+                if not trail_codes:
+                    # Fallback: older rippled with only policy_reason.
+                    pol_raw = d.get("policy_reason")
+                    if pol_raw is not None:
+                        trail_codes.append(str(pol_raw))
+
+                if len(trail_codes) > self._POLICY_HISTORY_MAX:
+                    trail_codes = trail_codes[-self._POLICY_HISTORY_MAX :]
+
+                if not trail_codes:
+                    policy_cell = "[dim]·[/dim]"
+                else:
+                    trail_parts: List[str] = []
+                    for i, code in enumerate(trail_codes):
+                        letter, colour = pol_letter_map.get(code, (code[:1].upper(), "white"))
+                        style = colour if i < len(trail_codes) - 1 else f"bold {colour}"
+                        trail_parts.append(f"[{style}]{letter}[/{style}]")
+                    policy_cell = "→".join(trail_parts)
+
                 peers = d.get("peers") if d.get("peers") is not None else d.get("peers_asked")
+                seq_disp = _fmt_int(d.get("seq"))
+                if d.get("priority_quorum"):
+                    # ★ prefix flags the single IBL currently holding
+                    # priority under RIPPLED_PRIORITY_QUORUM_IBL — the
+                    # one suppressing trigger() on all the others.
+                    seq_disp = f"[bold yellow]★[/bold yellow] {seq_disp}"
                 dt.add_row(
-                    _fmt_int(d.get("seq")),
+                    seq_disp,
+                    reason_cell,
+                    age_cell,
+                    held_cell,
+                    policy_cell,
                     have_str,
-                    need_str,
+                    skip_cell,
+                    state_cell,
+                    dstate_cell,
+                    tx_cell,
+                    dtx_cell,
+                    stall_cell,
+                    respgap_cell,
                     _fmt_int(peers),
                     _fmt_int(d.get("timeouts")),
                 )
+
+                # Snapshot the counters we'll diff against next poll.
+                if seq_int is not None:
+                    next_snapshot[seq_int] = {
+                        k: int(d.get(k) or 0)
+                        for k in (
+                            "state_nodes_inserted",
+                            "state_requests_sent",
+                            "state_unique_hashes",
+                            "state_rounds",
+                            "tx_nodes_inserted",
+                            "tx_requests_sent",
+                            "tx_unique_hashes",
+                            "tx_rounds",
+                        )
+                    }
+
+            # Replace (not merge) — seqs that rolled off should stop
+            # contributing spurious "still here" deltas if they come
+            # back, and RAM stays bounded to the live-acquire set.
+            self._prev_inbound = next_snapshot
+            # Prune the last-rendered Δ cache to the same live set so
+            # the stale-reuse path doesn't resurrect Δs for seqs that
+            # have since completed + re-entered the table.
+            live = set(next_snapshot.keys())
+            self._last_delta_cell = {k: v for k, v in self._last_delta_cell.items() if k[0] in live}
+            self._peak_idle_ms = {k: v for k, v in self._peak_idle_ms.items() if k[0] in live}
             return Panel(
                 Group(tbl, dt),
                 title="[bold]Inbound / Replay[/bold]",
@@ -419,33 +1053,316 @@ class LedgersInfoDisplay(VerticalScroll):
 
         return Panel(tbl, title="[bold]Inbound / Replay[/bold]", border_style="yellow")
 
+    def _state_accounting_panel(self) -> Optional[Panel]:
+        """Compact row of per-state durations + transition counts.
+
+        Input shape (from server_info.state_accounting): ::
+
+            {
+              "full":         {"duration_us": "153220067", "transitions": "1"},
+              "syncing":      {"duration_us": "9595533",   "transitions": "1"},
+              "tracking":     {"duration_us": "20",        "transitions": "1"},
+              "connected":    {"duration_us": "60098626",  "transitions": "2"},
+              "disconnected": {"duration_us": "1045263",   "transitions": "2"},
+            }
+
+        Render order echoes the server-state ladder (disconnected →
+        connected → syncing → tracking → full) so you read left-to-
+        right as "how the node climbed to full". Transition counts
+        above 1 mean the node has dropped back — highlight yellow.
+        """
+        sa = self._state_accounting
+        if not isinstance(sa, dict) or not sa:
+            return None
+
+        order = ("disconnected", "connected", "syncing", "tracking", "full")
+
+        def _fmt_dur(us_str: Any) -> str:
+            try:
+                us = int(us_str)
+            except (TypeError, ValueError):
+                return "-"
+            secs = us / 1_000_000
+            if secs < 1:
+                ms = us / 1000
+                return f"{ms:.0f}ms"
+            if secs < 60:
+                return f"{secs:.1f}s"
+            mins, rem = divmod(int(secs), 60)
+            if mins < 60:
+                return f"{mins}m{rem:02d}s"
+            hrs, mrem = divmod(mins, 60)
+            return f"{hrs}h{mrem:02d}m"
+
+        colour_for = {
+            "disconnected": "red",
+            "connected": "yellow",
+            "syncing": "cyan",
+            "tracking": "magenta",
+            "full": "green",
+        }
+
+        bits: List[str] = []
+        for name in order:
+            entry = sa.get(name)
+            if not isinstance(entry, dict):
+                continue
+            dur = _fmt_dur(entry.get("duration_us"))
+            try:
+                tr = int(entry.get("transitions") or 0)
+            except (TypeError, ValueError):
+                tr = 0
+            c = colour_for.get(name, "white")
+            tr_part = f"[yellow]×{tr}[/yellow]" if tr > 1 else f"[dim]×{tr}[/dim]"
+            bits.append(f"[{c}]{name}[/{c}] {dur} {tr_part}")
+
+        # Append any non-canonical states (defensive — schema changes).
+        for name, entry in sa.items():
+            if name in order or not isinstance(entry, dict):
+                continue
+            dur = _fmt_dur(entry.get("duration_us"))
+            try:
+                tr = int(entry.get("transitions") or 0)
+            except (TypeError, ValueError):
+                tr = 0
+            bits.append(f"[white]{name}[/white] {dur} [dim]×{tr}[/dim]")
+
+        if not bits:
+            return None
+
+        totals_line = Text.from_markup("  ·  ".join(bits))
+
+        # Timeline of observed transitions. Uses our client-side log
+        # (see update_state_accounting) so entries carry ordering +
+        # timestamps beyond what the server's totals-only counters
+        # reveal. Dim (inferred) entries are transitions we missed at
+        # the poll boundary but reconstructed from counter bumps.
+        timeline = self._state_timeline_line()
+
+        if timeline is None:
+            return Panel(
+                totals_line,
+                title="[bold]State Accounting[/bold]",
+                border_style="blue",
+            )
+        return Panel(
+            Group(totals_line, Text(""), timeline),
+            title="[bold]State Accounting[/bold]",
+            border_style="blue",
+        )
+
+    def _state_timeline_line(self) -> Optional[Text]:
+        if not self._state_log:
+            return None
+        colour_for = {
+            "disconnected": "red",
+            "connected": "yellow",
+            "syncing": "cyan",
+            "tracking": "magenta",
+            "full": "green",
+        }
+
+        def _fmt_ts(secs: float) -> str:
+            if secs < 60:
+                return f"{secs:.1f}s"
+            mins, rem = divmod(int(secs), 60)
+            if mins < 60:
+                return f"{mins}m{rem:02d}s"
+            hrs, mrem = divmod(mins, 60)
+            return f"{hrs}h{mrem:02d}m"
+
+        bits: List[str] = []
+        for ts, state, source in self._state_log:
+            c = colour_for.get(state, "white")
+            label = f"[{c}]{state}[/{c}]"
+            t_str = f"@{_fmt_ts(ts)}"
+            if source == "inferred":
+                # Dim + parens so the eye can distinguish a reconstructed
+                # visit from one we caught live.
+                bits.append(f"[dim]({label} {t_str})[/dim]")
+            else:
+                bits.append(f"{label} [dim]{t_str}[/dim]")
+        return Text.from_markup(" → ".join(bits))
+
+    def _peers_panel(self, ls: Dict[str, Any]) -> Optional[Panel]:
+        """Per-peer aggregated stats from ``local.peers``.
+
+        Producer-side aggregation is a union across every active IBL —
+        these are exactly the peers selected for ledger acquisition, so
+        this panel naturally belongs alongside the IBL view. Admin-only
+        upstream; empty/None if unavailable.
+        """
+        loc = ls.get("local") or {}
+        raw = loc.get("peers")
+        if not isinstance(raw, list) or not raw:
+            return None
+        peers = [p for p in raw if isinstance(p, dict)]
+        if not peers:
+            return None
+
+        def _ms(v: Any) -> str:
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                return "-"
+            if n <= 0:
+                return "[dim]·[/dim]"
+            s = f"{n}ms" if n < 1000 else f"{n / 1000:.1f}s"
+            if n < 500:
+                return f"[dim]{s}[/dim]"
+            if n < 2_000:
+                return s
+            return f"[red]{s}[/red]"
+
+        # Sort by peer_id ascending — stable positions poll-to-poll so
+        # the eye can track a specific peer's row across ticks. Flags
+        # on individual cells (red sent/unsol/flight) do the "where is
+        # the problem" work without needing row reordering.
+        def _peer_id_key(p: Dict[str, Any]) -> int:
+            try:
+                return int(p.get("peer_id") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        peers = sorted(peers, key=_peer_id_key)
+
+        tbl = Table(
+            show_header=True,
+            header_style="bold cyan",
+            box=None,
+            expand=True,
+            pad_edge=False,
+        )
+        tbl.add_column("peer", justify="right", style="yellow")
+        tbl.add_column("IBLs", justify="right", style="blue")
+        tbl.add_column("sent", justify="right", style="cyan")
+        tbl.add_column("rep", justify="right", style="green")
+        tbl.add_column("unsol", justify="right", style="yellow")
+        tbl.add_column("nodes", justify="right", style="cyan")
+        tbl.add_column("flight", justify="right", style="magenta")
+        tbl.add_column("min", justify="right")
+        tbl.add_column("avg", justify="right")
+        tbl.add_column("med", justify="right")
+        tbl.add_column("max", justify="right")
+
+        for p in peers:
+            sent = int(p.get("sent", 0) or 0)
+            replied = int(p.get("replied", 0) or 0)
+            unsol = int(p.get("replied_unsolicited", 0) or 0)
+            in_flight = int(p.get("in_flight", 0) or 0)
+
+            # Flag "peer hoarding requests, never replies" and
+            # "peer pushing stuff we didn't ask for" inline.
+            sent_cell = _fmt_int(sent)
+            if sent and replied == 0 and sent > 4:
+                sent_cell = f"[bold red]{sent:,}[/bold red]"
+            unsol_cell = _fmt_int(unsol) if unsol else "[dim]·[/dim]"
+            if replied and unsol * 2 >= replied:
+                unsol_cell = f"[bold red]{_fmt_int(unsol)}[/bold red]"
+            flight_cell = _fmt_int(in_flight)
+            if in_flight > 32:
+                flight_cell = f"[red]{in_flight:,}[/red]"
+            elif in_flight > 8:
+                flight_cell = f"[yellow]{in_flight:,}[/yellow]"
+            elif in_flight == 0:
+                flight_cell = "[dim]0[/dim]"
+
+            tbl.add_row(
+                _fmt_int(p.get("peer_id")),
+                _fmt_int(p.get("ibls_active")),
+                sent_cell,
+                _fmt_int(replied),
+                unsol_cell,
+                _fmt_int(p.get("nodes_received")),
+                flight_cell,
+                _ms(p.get("min_ms")),
+                _ms(p.get("avg_ms")),
+                _ms(p.get("median_ms")),
+                _ms(p.get("max_ms")),
+            )
+
+        return Panel(
+            tbl, title="[bold]Peers (selected for acquisition)[/bold]", border_style="cyan"
+        )
+
     def _legend_panel(self) -> Panel:
-        # Keep the legend concise but exhaustive for the fields we render.
-        # No code receipts here — this panel is for a reader scanning the
-        # live view, not for auditing source.
-        lines = [
-            ("network.highest_validation_seen", "highest seq we've seen a trusted validation for"),
-            ("network.preferred", "the validator-preferred fork tip"),
-            ("local.closed", "last ledger consensus agreed to close"),
-            ("local.validated", "last ledger the trusted quorum signed AND we have"),
-            ("local.published", "last ledger we told subscribers about"),
-            ("local.building", "the in-progress ledger (parent + phase)"),
-            ("retained", "ledgers still held in RAM for service (target = config floor)"),
-            ("complete", "ledgers we have the bytes for (nodestore coverage)"),
-            ("missing", "holes inside [firstComplete..validated] — fill targets"),
-            ("inbound_acquiring", "ledgers we're actively pulling from peers"),
-            ("replaying", "ledgers under explicit replay (admin-triggered)"),
-            ("", ""),
-            ("behind_network", "this node lags the validator-seen tip by N seqs"),
-            ("awaiting_publish", "validated but not yet told subscribers — publish backpressure"),
-            ("close_to_validate", "closed locally but no quorum yet — network or local lag"),
-        ]
-        tbl = Table(show_header=False, box=None, expand=True, pad_edge=False)
-        tbl.add_column(style="yellow", no_wrap=True, ratio=2)
-        tbl.add_column(style="dim", no_wrap=False, ratio=5)
-        for name, desc in lines:
+        # Two-column grid: left column explains Gaps + Pointers + Ranges
+        # shorthand, right column explains the cryptic Inbound detail
+        # columns. Dim body text — the legend shouldn't outshine the
+        # live data.
+        def _row(tbl: Table, name: str, desc: str) -> None:
             tbl.add_row(name, desc)
-        return Panel(tbl, title="[bold]Legend[/bold]", border_style="blue")
+
+        left = Table(show_header=False, box=None, expand=True, pad_edge=False)
+        left.add_column(style="yellow", no_wrap=True, ratio=2)
+        left.add_column(style="dim", no_wrap=False, ratio=5, overflow="fold")
+        for name, desc in (
+            ("net.highest_seen", "highest seq with a trusted validation"),
+            ("net.preferred", "validator-preferred fork tip"),
+            ("local.closed", "last ledger consensus agreed to close"),
+            ("local.validated", "last ledger trusted quorum signed + we have"),
+            ("local.published", "last ledger we told subscribers about"),
+            ("local.building", "in-progress ledger (parent + phase)"),
+            ("retained", "still held in RAM (target = config floor)"),
+            ("complete", "we have the bytes (nodestore coverage)"),
+            ("missing", "holes in [firstComplete..validated]"),
+            ("inbound_acquiring", "actively pulling from peers"),
+            ("replaying", "admin-triggered explicit replay"),
+            ("behind_network", "seq lag vs validator-seen tip"),
+            ("awaiting_publish", "validated, not yet told subscribers"),
+            ("close_to_validate", "closed locally, no quorum yet"),
+            ("inferred_gap", "max(inbound) − local.validated"),
+        ):
+            _row(left, name, desc)
+
+        right = Table(show_header=False, box=None, expand=True, pad_edge=False)
+        right.add_column(style="yellow", no_wrap=True, ratio=2)
+        right.add_column(style="dim", no_wrap=False, ratio=5, overflow="fold")
+        for name, desc in (
+            ("r", "reason: C=consensus, H=history, G=generic, S=shard, ?=missing"),
+            ("age", "time since IBL construction (red ≥2m)"),
+            ("held", "time since last trigger() admit; ∅ = never admitted"),
+            (
+                "policy",
+                "trail of transitions (newest bold): "
+                "[green]A[/green]=admitted [yellow]P[/yellow]=publish-blocker "
+                "[yellow]W[/yellow]=publish-window [cyan]F[/cyan]=frontier "
+                "[cyan]N[/cyan]=frontier-no-tx [magenta]H[/magenta]=held "
+                "[magenta]B[/magenta]=bootstrap [red]E[/red]=evict "
+                "[green]C[/green]=cold-completer [green]S[/green]=cold-support "
+                "[cyan]O[/cyan]=tip-header-only [cyan]Q[/cyan]=tip-skip-probe "
+                "[blue]?[/blue]=pending-seq",
+            ),
+            ("★", "priority_quorum IBL — trigger() suppressed on others"),
+            ("have", "HST flags — H=header, S=state, T=transactions; lower = missing"),
+            (
+                "skip",
+                "skip-list probe lifecycle: [cyan]P[/cyan]=probe_sent "
+                "[green]K[/green]=have_skip [green]H[/green]=harvested; lower = off",
+            ),
+            (
+                "i/r/u/R",
+                "inserted / requested / unique-first-claim / Rounds; "
+                "state `R N([yellow]M[/yellow])` = M of N rounds were 'burrow' "
+                "(bc1-inners or DirectoryNode-only leaves)",
+            ),
+            ("Δ", "per-poll delta; ⏸ = unchanged, last non-zero held"),
+            ("stall cur↑peak", "gap (last-request − last-response); peak latched per IBL"),
+            ("resp gap min/avg/max", "inter-response gap stats from event array"),
+            ("∅", "asked, never replied (classic stall)"),
+            ("·", "no data yet / first observation"),
+            ("peers", "count of peers currently being asked"),
+            ("t/o", "cumulative request-timeout retries for this IBL"),
+            ("colour", "[dim]< 2s[/dim] · 2–10s · [red]≥ 10s[/red]"),
+            ("peers", "per-peer aggregated send/reply/latency across IBLs (admin)"),
+        ):
+            _row(right, name, desc)
+
+        grid = Table.grid(expand=True, padding=(0, 2))
+        grid.add_column(ratio=1)
+        grid.add_column(ratio=1)
+        grid.add_row(left, right)
+        return Panel(grid, title="[bold]Legend[/bold]", border_style="blue")
 
     def _raw_json_panel(self, ls: Dict[str, Any]) -> Panel:
         """Full pretty-printed JSON of the payload.
