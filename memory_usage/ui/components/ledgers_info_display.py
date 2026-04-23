@@ -957,6 +957,13 @@ class LedgersInfoDisplay(VerticalScroll):
                     # entries, support keeps the fetch-pack pump primed.
                     "cold-completer": ("C", "green"),
                     "cold-support": ("S", "green"),
+                    # Triage hold under RIPPLED_IBL_COLD_SERIAL (default
+                    # on): every non-completer IBL is fully suppressed
+                    # (no header, no state, no tx) until the designated
+                    # completer lands a full state tree. Mnemonic: L
+                    # for coLd-Lock / Lockout. Magenta so the colour
+                    # echoes "held" variants.
+                    "cold-held": ("L", "magenta"),
                     # Tip IBL sub-states in CATCHUP: tip-header-only is
                     # pre-state-probe ("we just want the header"),
                     # tip-skip-probe is the active skip-list probe phase.
@@ -1330,6 +1337,7 @@ class LedgersInfoDisplay(VerticalScroll):
                 "[cyan]N[/cyan]=frontier-no-tx [magenta]H[/magenta]=held "
                 "[magenta]B[/magenta]=bootstrap [red]E[/red]=evict "
                 "[green]C[/green]=cold-completer [green]S[/green]=cold-support "
+                "[magenta]L[/magenta]=cold-held "
                 "[cyan]O[/cyan]=tip-header-only [cyan]Q[/cyan]=tip-skip-probe "
                 "[blue]?[/blue]=pending-seq",
             ),
