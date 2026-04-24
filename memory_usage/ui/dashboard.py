@@ -123,6 +123,78 @@ def _derive_timing_from_events(
     return prior_elapsed, prior_monitoring, original_sync
 
 
+def _collapse_spaces_to_tabs(line: str, tabstop: int) -> str:
+    """Lossless space → tab compression against a known tabstop.
+
+    Walks a line once, tracking the display column. Runs of spaces that
+    cross one or more tabstop boundaries collapse to ``\\t`` plus any
+    leftover spaces at the tail. A run that doesn't cross a boundary
+    stays as spaces (can't represent that indent with a tab at the
+    chosen tabstop). Reversible: ``line.expandtabs(tabstop)`` restores
+    the original space-padded rendering exactly.
+    """
+    out: List[str] = []
+    col = 0
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch != " ":
+            out.append(ch)
+            col += 1
+            i += 1
+            continue
+        j = i
+        while j < n and line[j] == " ":
+            j += 1
+        run_end_col = col + (j - i)
+        cur = col
+        while cur < run_end_col:
+            next_tab = ((cur // tabstop) + 1) * tabstop
+            if next_tab <= run_end_col:
+                out.append("\t")
+                cur = next_tab
+            else:
+                out.append(" " * (run_end_col - cur))
+                cur = run_end_col
+        col = run_end_col
+        i = j
+    return "".join(out)
+
+
+def _best_tab_collapse_frame(lines: List[str]) -> tuple[List[str], int]:
+    """Pick one tabstop for a whole frame and collapse every line.
+
+    Tries 8, 4, 2. Keeps whichever minimises total post-collapse
+    length across *all* lines — must be a single tabstop for the
+    whole frame, otherwise pasting into any editor with one tabstop
+    setting mis-aligns some lines. Falls back to no-op (tabstop 0)
+    if none of the candidates shrink.
+
+    Returns ``(lines, tabstop)`` so the caller can surface the choice
+    (e.g. include it in a header comment) if desired. An empty input
+    returns ``([], 0)``.
+
+    Tiebreaker: prefer the larger tabstop — fewer tab characters,
+    renders sensibly in any fixed-tabstop viewer whose setting differs
+    slightly. We iterate 8 → 4 → 2 and only replace on strict improvement,
+    so ties naturally keep the earlier (larger) tabstop.
+    """
+    if not lines:
+        return [], 0
+    best_lines = lines
+    best_ts = 0
+    best_total = sum(len(s) for s in lines)
+    for ts in (8, 4, 2):
+        candidates = [_collapse_spaces_to_tabs(s, ts) for s in lines]
+        total = sum(len(s) for s in candidates)
+        if total < best_total:
+            best_total = total
+            best_lines = candidates
+            best_ts = ts
+    return best_lines, best_ts
+
+
 class MemoryMonitorDashboard(App):
     """Main dashboard application with proper DI"""
 
@@ -1023,8 +1095,32 @@ class MemoryMonitorDashboard(App):
             return
 
         # SVG emits one <text> per styled run with x/y coordinates.
-        # Group by Y (one line) then sort by X (reading order within
-        # the line). The text content is XML-escaped → unescape() it.
+        # Reconstructing the text grid requires two tricks:
+        #
+        # 1. Gaps between runs are POSITIONAL, not textual — the SVG
+        #    leaves whitespace between styled segments implicit in
+        #    their x coordinates. Joining the content strings with ""
+        #    mashes column-separated table cells together. We derive a
+        #    per-cell pixel width (cell_w) from the SVG's font-size
+        #    attribute and re-pad with spaces to each segment's
+        #    computed column.
+        # 2. Rich encodes preserved whitespace INSIDE a run as U+00A0
+        #    (NBSP) so SVG doesn't collapse it — but NBSP shows up as
+        #    "<0xa0>" when the clipboard payload is rendered in a
+        #    non-Unicode-safe viewer. Normalise to regular ASCII space
+        #    before copying.
+        font_size = 14.0
+        fs_m = re.search(r"font-size:\s*([\d.]+)", svg)
+        if fs_m:
+            try:
+                font_size = float(fs_m.group(1))
+            except ValueError:
+                pass
+        # Fira Code / generic monospace cell advance ≈ 0.611 × font_size.
+        # Close enough to land each segment in the right column bucket
+        # without having to parse <tspan>/textLength precisely.
+        cell_w = max(1.0, font_size * 0.611)
+
         pat = re.compile(
             r'<text\b[^>]*?\sx="([\d.]+)"[^>]*?\sy="([\d.]+)"[^>]*?>(.*?)</text>',
             re.DOTALL,
@@ -1036,15 +1132,37 @@ class MemoryMonitorDashboard(App):
                 y = float(m.group(2))
             except ValueError:
                 continue
-            content = unescape(m.group(3))
+            content = unescape(m.group(3)).replace("\xa0", " ")
             by_y.setdefault(y, []).append((x, content))
 
-        lines: List[str] = []
+        # First pass: find the minimum x across every segment — that
+        # becomes column zero for the whole frame (there's usually a
+        # left padding rect offset of 1-2 cells).
+        min_x = min(
+            (t[0] for pts in by_y.values() for t in pts),
+            default=0.0,
+        )
+
+        raw_lines: List[str] = []
         for y in sorted(by_y):
             row = sorted(by_y[y], key=lambda t: t[0])
-            lines.append("".join(t[1] for t in row).rstrip())
-        while lines and not lines[-1].strip():
-            lines.pop()
+            buf: List[str] = []
+            pos = 0
+            for x, content in row:
+                if not content:
+                    continue
+                col = int(round((x - min_x) / cell_w))
+                if col > pos:
+                    buf.append(" " * (col - pos))
+                    pos = col
+                buf.append(content)
+                pos += len(content)
+            raw_lines.append("".join(buf).rstrip())
+        while raw_lines and not raw_lines[-1].strip():
+            raw_lines.pop()
+        # Frame-wide tabstop so a single editor tabstop setting renders
+        # every line correctly; per-line tabstop would look ragged.
+        lines, tabstop = _best_tab_collapse_frame(raw_lines)
         if not lines:
             self.monitor_log.queue_message(
                 ">>> screenshot produced no text (SVG extract empty)",
@@ -1070,8 +1188,9 @@ class MemoryMonitorDashboard(App):
                 continue
             try:
                 subprocess.run(cmd, input=payload.encode("utf-8"), check=True)
+                ts_note = f", tabstop={tabstop}" if tabstop else ""
                 self.monitor_log.queue_message(
-                    f">>> screenshot copied to clipboard ({len(lines)} lines)",
+                    f">>> screenshot copied to clipboard ({len(lines)} lines{ts_note})",
                     "bold cyan",
                 )
                 return
