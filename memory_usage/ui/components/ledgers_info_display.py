@@ -964,6 +964,20 @@ class LedgersInfoDisplay(VerticalScroll):
                     # for coLd-Lock / Lockout. Magenta so the colour
                     # echoes "held" variants.
                     "cold-held": ("L", "magenta"),
+                    # Rolling phase — we have >=1 complete state locally
+                    # but haven't published yet. Suppress publish on
+                    # every completion, roll a resident forward toward
+                    # network tip, then commit-to-publish when the gap
+                    # is tolerable. Letters group a family:
+                    #   R = active Builder (green: real work)
+                    #   D = resiDent (cyan: held ready, not progressing)
+                    #   M = coMmitting (yellow: next to publish,
+                    #       echoing publish-blocker/publish-window)
+                    #   X = held under rolling (magenta: suppressed)
+                    "rolling-builder": ("R", "green"),
+                    "rolling-resident": ("D", "cyan"),
+                    "rolling-committing": ("M", "yellow"),
+                    "rolling-held": ("X", "magenta"),
                     # Tip IBL sub-states in CATCHUP: tip-header-only is
                     # pre-state-probe ("we just want the header"),
                     # tip-skip-probe is the active skip-list probe phase.
@@ -1338,6 +1352,8 @@ class LedgersInfoDisplay(VerticalScroll):
                 "[magenta]B[/magenta]=bootstrap [red]E[/red]=evict "
                 "[green]C[/green]=cold-completer [green]S[/green]=cold-support "
                 "[magenta]L[/magenta]=cold-held "
+                "[green]R[/green]=rolling-builder [cyan]D[/cyan]=rolling-resident "
+                "[yellow]M[/yellow]=rolling-committing [magenta]X[/magenta]=rolling-held "
                 "[cyan]O[/cyan]=tip-header-only [cyan]Q[/cyan]=tip-skip-probe "
                 "[blue]?[/blue]=pending-seq",
             ),

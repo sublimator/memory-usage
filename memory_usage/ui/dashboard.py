@@ -3,6 +3,8 @@ Main dashboard application using dependency injection
 """
 
 import asyncio
+import re
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -121,6 +123,120 @@ def _derive_timing_from_events(
         close_session(current_last_t)
 
     return prior_elapsed, prior_monitoring, original_sync
+
+
+_SVG_NS = "http://www.w3.org/2000/svg"
+_TRANSLATE_RE = re.compile(r"translate\(\s*(-?[\d.]+)\s*,?\s*(-?[\d.]+)?\s*\)")
+
+
+def _translate_of(transform: Optional[str]) -> tuple[float, float]:
+    """Pull (tx, ty) from a transform attribute; returns (0, 0) if absent.
+
+    Handles ``translate(X)``, ``translate(X, Y)``, ``translate(X Y)`` —
+    the SVG forms Rich + Textual actually emit. Ignores other transform
+    ops (scale, rotate, matrix) because the terminal content is always
+    plain translates; a real matrix would break the assumption anyway.
+    """
+    if not transform:
+        return 0.0, 0.0
+    m = _TRANSLATE_RE.search(transform)
+    if not m:
+        return 0.0, 0.0
+    try:
+        tx = float(m.group(1))
+    except (TypeError, ValueError):
+        tx = 0.0
+    try:
+        ty = float(m.group(2)) if m.group(2) is not None else 0.0
+    except (TypeError, ValueError):
+        ty = 0.0
+    return tx, ty
+
+
+def _extract_svg_terminal_rows(
+    svg: str,
+) -> Optional[tuple[Dict[float, List[tuple[float, str]]], float, float]]:
+    """Parse a Rich/Textual-emitted SVG into (rows, cell_w, min_x).
+
+    We use ``xml.etree.ElementTree`` (stdlib) instead of regex because
+    the SVG has multiple transform groups — the terminal body, the
+    window-chrome header (traffic-light dots + app name), and the
+    title — each at its own coordinate system. Regex-sweeping every
+    ``<text>`` merges them into the same output, producing phantom
+    rows (title, header) and wrong ``min_x`` (driving the grid-
+    alignment drift the user saw as ``[39    threads]``).
+
+    Strategy:
+      1. Walk groups, accumulating ancestor translate offsets.
+      2. Only keep ``<text>`` inside a group whose ``class`` contains
+         ``"matrix"`` — that's Rich's terminal-body class.
+      3. Derive cell width from the FIRST in-matrix segment that
+         carries ``textLength`` / non-empty text (exact, no approx).
+      4. Fall back to font-size × 0.611 only if no textLength exists
+         anywhere (old Rich or a different exporter).
+
+    Returns (by_y, cell_w, min_x) or None if the SVG couldn't be
+    parsed at all.
+    """
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return None
+
+    text_tag = f"{{{_SVG_NS}}}text"
+    by_y: Dict[float, List[tuple[float, str]]] = {}
+    cell_w: Optional[float] = None
+
+    def walk(node: ET.Element, dx: float, dy: float, in_matrix: bool) -> None:
+        nonlocal cell_w
+        here_in_matrix = in_matrix
+        # Descend through groups, accumulating translates. class can
+        # carry hash-suffixed names like "terminal-1234-matrix".
+        if node.tag.endswith("}g") or node.tag == "g":
+            cls = node.get("class") or ""
+            if "matrix" in cls:
+                here_in_matrix = True
+            tx, ty = _translate_of(node.get("transform"))
+            dx += tx
+            dy += ty
+        if node.tag == text_tag and here_in_matrix:
+            try:
+                x = float(node.get("x", "0")) + dx
+                y = float(node.get("y", "0")) + dy
+            except (TypeError, ValueError):
+                return
+            content = (node.text or "").replace("\xa0", " ")
+            tl = node.get("textLength")
+            if cell_w is None and content and tl is not None:
+                try:
+                    cw = float(tl) / max(1, len(content))
+                    if cw > 0:
+                        cell_w = cw
+                except (TypeError, ValueError):
+                    pass
+            by_y.setdefault(y, []).append((x, content))
+        for child in node:
+            walk(child, dx, dy, here_in_matrix)
+
+    walk(root, 0.0, 0.0, False)
+
+    if cell_w is None:
+        # Fallback: font-size × 0.611 Fira Code advance. Used only if
+        # no text element inside the matrix carried textLength.
+        fs_m = re.search(r"font-size:\s*([\d.]+)", svg)
+        font_size = 14.0
+        if fs_m:
+            try:
+                font_size = float(fs_m.group(1))
+            except ValueError:
+                pass
+        cell_w = max(1.0, font_size * 0.611)
+
+    min_x = min(
+        (t[0] for pts in by_y.values() for t in pts),
+        default=0.0,
+    )
+    return by_y, cell_w, min_x
 
 
 def _collapse_spaces_to_tabs(line: str, tabstop: int) -> str:
@@ -1082,11 +1198,9 @@ class MemoryMonitorDashboard(App):
         because the compositor hadn't repainted yet. We then parse
         text out of the SVG grouped by Y coordinate.
         """
-        import re
         import shutil
         import subprocess
         import sys
-        from html import unescape
 
         try:
             svg = self.export_screenshot(title=self.title)
@@ -1094,56 +1208,16 @@ class MemoryMonitorDashboard(App):
             self.monitor_log.queue_message(f">>> screenshot render failed: {e}", "bold red")
             return
 
-        # SVG emits one <text> per styled run with x/y coordinates.
-        # Reconstructing the text grid requires two tricks:
-        #
-        # 1. Gaps between runs are POSITIONAL, not textual — the SVG
-        #    leaves whitespace between styled segments implicit in
-        #    their x coordinates. Joining the content strings with ""
-        #    mashes column-separated table cells together. We derive a
-        #    per-cell pixel width (cell_w) from the SVG's font-size
-        #    attribute and re-pad with spaces to each segment's
-        #    computed column.
-        # 2. Rich encodes preserved whitespace INSIDE a run as U+00A0
-        #    (NBSP) so SVG doesn't collapse it — but NBSP shows up as
-        #    "<0xa0>" when the clipboard payload is rendered in a
-        #    non-Unicode-safe viewer. Normalise to regular ASCII space
-        #    before copying.
-        font_size = 14.0
-        fs_m = re.search(r"font-size:\s*([\d.]+)", svg)
-        if fs_m:
-            try:
-                font_size = float(fs_m.group(1))
-            except ValueError:
-                pass
-        # Fira Code / generic monospace cell advance ≈ 0.611 × font_size.
-        # Close enough to land each segment in the right column bucket
-        # without having to parse <tspan>/textLength precisely.
-        cell_w = max(1.0, font_size * 0.611)
+        rows = _extract_svg_terminal_rows(svg)
+        if rows is None:
+            self.monitor_log.queue_message(
+                ">>> screenshot parse failed (SVG shape unfamiliar)",
+                "bold red",
+            )
+            return
+        by_y, cell_w, min_x = rows
 
-        pat = re.compile(
-            r'<text\b[^>]*?\sx="([\d.]+)"[^>]*?\sy="([\d.]+)"[^>]*?>(.*?)</text>',
-            re.DOTALL,
-        )
-        by_y: Dict[float, List[tuple[float, str]]] = {}
-        for m in pat.finditer(svg):
-            try:
-                x = float(m.group(1))
-                y = float(m.group(2))
-            except ValueError:
-                continue
-            content = unescape(m.group(3)).replace("\xa0", " ")
-            by_y.setdefault(y, []).append((x, content))
-
-        # First pass: find the minimum x across every segment — that
-        # becomes column zero for the whole frame (there's usually a
-        # left padding rect offset of 1-2 cells).
-        min_x = min(
-            (t[0] for pts in by_y.values() for t in pts),
-            default=0.0,
-        )
-
-        raw_lines: List[str] = []
+        lines: List[str] = []
         for y in sorted(by_y):
             row = sorted(by_y[y], key=lambda t: t[0])
             buf: List[str] = []
@@ -1157,12 +1231,21 @@ class MemoryMonitorDashboard(App):
                     pos = col
                 buf.append(content)
                 pos += len(content)
-            raw_lines.append("".join(buf).rstrip())
-        while raw_lines and not raw_lines[-1].strip():
-            raw_lines.pop()
-        # Frame-wide tabstop so a single editor tabstop setting renders
-        # every line correctly; per-line tabstop would look ragged.
-        lines, tabstop = _best_tab_collapse_frame(raw_lines)
+            lines.append("".join(buf).rstrip())
+        while lines and not lines[-1].strip():
+            lines.pop()
+        # TODO: re-enable space→tab compression once we understand where
+        # the "extra space" drift was coming from. The suspects are:
+        #   a) our cell_w derivation (now exact from textLength, but we
+        #      still don't trust it under wide rows with rtl / CJK cells),
+        #   b) the column rounding (int(round((x-min_x)/cell_w)) may land
+        #      off by 1 on right-edge segments under certain fonts),
+        #   c) tabstop-aware viewers displaying tabs differently from
+        #      our padding model (mostly ruled out, but keep on the list).
+        # Parked: see _best_tab_collapse_frame + tests/test_tab_collapse.py
+        # for the helpers. Spaces-only for now — output is bigger but
+        # provably correct against any reader.
+        tabstop = 0
         if not lines:
             self.monitor_log.queue_message(
                 ">>> screenshot produced no text (SVG extract empty)",
